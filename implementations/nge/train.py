@@ -4,6 +4,7 @@ import mlx.optimizers as optim
 from functools import partial
 
 from model import task, nge, PARALLEL_ALGORITHM, SEQUENTIAL_ALGORITHM
+from nge_utils import calculate_accuracy_metrics, SimpleLogger
 
 
 class NGETrainer:    
@@ -83,11 +84,23 @@ class NGETrainer:
             if task_type == PARALLEL_ALGORITHM:
                 state, distance, predesecor = output
                 reachability_target, distance_target, predesecor_target = graph_targets
+                
+                # Calculate accuracy metrics
+                metrics = calculate_accuracy_metrics(state, predesecor, reachability_target, predesecor_target, 
+                                                   termination_prob, termination_target, distance, distance_target)
+                logger.log_step_metrics(metrics, phase='train')
+                
                 logger.log_debug_info(state, predesecor, reachability_target, predesecor_target, 
                                     termination_prob, termination_target, distance, distance_target, task.PARALLEL_ALGORITHM)
             elif task_type == SEQUENTIAL_ALGORITHM:
                 state, predesecor = output
                 reachability_target, predesecor_target = graph_targets
+                
+                # Calculate accuracy metrics
+                metrics = calculate_accuracy_metrics(state, predesecor, reachability_target, predesecor_target, 
+                                                   termination_prob, termination_target)
+                logger.log_step_metrics(metrics, phase='train')
+                
                 logger.log_debug_info(state, predesecor, reachability_target, predesecor_target, 
                                     termination_prob, termination_target, task_type=task.SEQUENTIAL_ALGORITHM)
         
@@ -105,11 +118,23 @@ class NGETrainer:
             if task_type == PARALLEL_ALGORITHM:
                 state, distance, predesecor = output
                 reachability_target, distance_target, predesecor_target = graph_targets
+                
+                # Calculate accuracy metrics
+                metrics = calculate_accuracy_metrics(state, predesecor, reachability_target, predesecor_target, 
+                                                   termination_prob, termination_target, distance, distance_target)
+                logger.log_step_metrics(metrics, phase='val')
+                
                 logger.log_debug_info(state, predesecor, reachability_target, predesecor_target, 
                                     termination_prob, termination_target, distance, distance_target, task.PARALLEL_ALGORITHM)
             elif task_type == SEQUENTIAL_ALGORITHM:
                 state, predesecor = output
                 reachability_target, predesecor_target = graph_targets
+                
+                # Calculate accuracy metrics
+                metrics = calculate_accuracy_metrics(state, predesecor, reachability_target, predesecor_target, 
+                                                   termination_prob, termination_target)
+                logger.log_step_metrics(metrics, phase='val')
+                
                 logger.log_debug_info(state, predesecor, reachability_target, predesecor_target, 
                                     termination_prob, termination_target, task_type=task.SEQUENTIAL_ALGORITHM)
         
@@ -268,9 +293,28 @@ class NGETrainer:
             
             for task_type in task_types:
                 task_name = "sequential" if task_type == task.SEQUENTIAL_ALGORITHM else "parallel"
-                test_loss = self.train_model(dataset, task_type, logger, phase="test")
+                
+                # Create a temporary logger to capture test metrics
+                test_logger = SimpleLogger(debug=False) if logger is None else logger
+                test_logger.start_epoch(0, 1, len(dataset))
+                
+                test_loss = self.train_model(dataset, task_type, test_logger, phase="test")
                 dataset_results[task_name] = test_loss
-                print(f"  {task_name}: {test_loss:.4f}")
+                
+                # Get test accuracy metrics
+                test_metrics = test_logger._average_metrics(test_logger.step_metrics.get('val', []))
+                
+                print(f"  {task_name} - Loss: {test_loss:.4f}", end="")
+                if test_metrics:
+                    print(f", Acc - State: {test_metrics.get('state_acc', 0):.3f}, "
+                          f"Pred: {test_metrics.get('pred_acc', 0):.3f}, "
+                          f"Term: {test_metrics.get('term_acc', 0):.3f}", end="")
+                    if 'dist_acc' in test_metrics:
+                        print(f", Dist: {test_metrics.get('dist_acc', 0):.3f}")
+                    else:
+                        print()
+                else:
+                    print()
             
             results[dataset_name] = dataset_results
         
