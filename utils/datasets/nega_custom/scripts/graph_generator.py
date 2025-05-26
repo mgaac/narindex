@@ -374,22 +374,22 @@ def generate_targets(graph, start, task_type):
 if __name__ == "__main__":
     # Generate graphs with progress bars
     train_graphs_nested = [generate_graphs(20) for _ in tqdm(range(100), desc="Generating train graphs", leave=False)]
-    # val_graphs_nested = [generate_graphs(20) for _ in tqdm(range(5), desc="Generating validation graphs", leave=False)]
-    # test_graphs_20_nested = [generate_graphs(20) for _ in tqdm(range(5), desc="Generating test graphs (20 nodes)", leave=False)]
-    # test_graphs_50_nested = [generate_graphs(50) for _ in tqdm(range(5), desc="Generating test graphs (50 nodes)", leave=False)]
-    # test_graphs_100_nested = [generate_graphs(100) for _ in tqdm(range(5), desc="Generating test graphs (100 nodes)", leave=False)]
+    val_graphs_nested = [generate_graphs(20) for _ in tqdm(range(5), desc="Generating validation graphs", leave=False)]
+    test_graphs_20_nested = [generate_graphs(20) for _ in tqdm(range(5), desc="Generating test graphs (20 nodes)", leave=False)]
+    test_graphs_50_nested = [generate_graphs(50) for _ in tqdm(range(5), desc="Generating test graphs (50 nodes)", leave=False)]
+    test_graphs_100_nested = [generate_graphs(100) for _ in tqdm(range(5), desc="Generating test graphs (100 nodes)", leave=False)]
 
     # Flatten the lists
     train_graphs = [graph for graphs in train_graphs_nested for graph in graphs]
-    # val_graphs = [graph for graphs in val_graphs_nested for graph in graphs]
-    # test_graphs_20 = [graph for graphs in test_graphs_20_nested for graph in graphs]
-    # test_graphs_50 = [graph for graphs in test_graphs_50_nested for graph in graphs]
-    # test_graphs_100 = [graph for graphs in test_graphs_100_nested for graph in graphs]
+    val_graphs = [graph for graphs in val_graphs_nested for graph in graphs]
+    test_graphs_20 = [graph for graphs in test_graphs_20_nested for graph in graphs]
+    test_graphs_50 = [graph for graphs in test_graphs_50_nested for graph in graphs]
+    test_graphs_100 = [graph for graphs in test_graphs_100_nested for graph in graphs]
 
     print("Saving graphs...\n")
 
     save_graphs(train_graphs, 'train_graphs.pkl')
-    # save_graphs(val_graphs, 'val_graphs.pkl')
-    # save_graphs(test_graphs_20, 'test_graphs_20.pkl')
-    # save_graphs(test_graphs_50, 'test_graphs_50.pkl')
-    # save_graphs(test_graphs_100, 'test_graphs_100.pkl')
+    save_graphs(val_graphs, 'val_graphs.pkl')
+    save_graphs(test_graphs_20, 'test_graphs_20.pkl')
+    save_graphs(test_graphs_50, 'test_graphs_50.pkl')
+    save_graphs(test_graphs_100, 'test_graphs_100.pkl')
