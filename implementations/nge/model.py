@@ -18,21 +18,22 @@ class aggregation_fn(Enum):
     MAX = 5
 
 class mp_layer(nn.Module):
-    def __init__(self, embedding_dim: int, dim_proj: int, dropout_prob: float, skip_connections: bool, aggregation_fn: Enum):
+    def __init__(self, embedding_dim: int, dropout_prob: float, skip_connections: bool, aggregation_fn: Enum):
         super().__init__()
 
         self.source_idx = 0
         self.target_idx = 1
 
-        self.dim_proj = dim_proj
+        self.embedding_dim = embedding_dim
+
         self.dropout_prob = dropout_prob
         self.skip_connections = skip_connections
         self.aggregation_fn = aggregation_fn
 
-        self.source_message_fn = mx.random.normal([1, embedding_dim, dim_proj])
-        self.target_message_fn = mx.random.normal([1, embedding_dim, dim_proj])
+        self.source_message_fn = mx.random.normal([1, embedding_dim, embedding_dim])
+        self.target_message_fn = mx.random.normal([1, embedding_dim, embedding_dim])
 
-        self.update_fn = nn.Linear(dim_proj, embedding_dim)
+        self.update_fn = nn.Linear(embedding_dim, embedding_dim)
 
         self.dropout = nn.Dropout(dropout_prob)
         self.relu = nn.ReLU()
@@ -66,7 +67,7 @@ class mp_layer(nn.Module):
 
         message = self.relu(message)
 
-        agg_message = mx.zeros([num_nodes, self.dim_proj])
+        agg_message = mx.zeros([num_nodes, self.embedding_dim])
 
         if (self.aggregation_fn == aggregation_fn.SUM):
             agg_message = agg_message.at[target_idx].add(message)
@@ -92,17 +93,16 @@ class mp_layer(nn.Module):
         return new_node_embeddings
 
 class mpnn(nn.Module):
-    def __init__(self, embedding_dim: int, dim_proj: int, dropout_prob: float, skip_connections: bool, aggregation_fn: Enum, num_mp_layers: int):
+    def __init__(self, embedding_dim: int, dropout_prob: float, skip_connections: bool, aggregation_fn: Enum, num_mp_layers: int):
         super(mpnn, self).__init__()
 
         self.embedding_dim = embedding_dim
-        self.dim_proj = dim_proj
         self.dropout_prob = dropout_prob
         self.skip_connections = skip_connections
         self.aggregation_function_fn = aggregation_fn
 
         self.mp_layer = [
-            mp_layer(embedding_dim, dim_proj, dropout_prob, skip_connections, aggregation_fn)
+            mp_layer(embedding_dim, dropout_prob, skip_connections, aggregation_fn)
             for _ in range(num_mp_layers)
         ]
 
@@ -178,7 +178,7 @@ class decoder(nn.Module):
             return bfs_state_predictions, bf_distance_predictions, predesecor_predictions
     
 class nge(nn.Module):
-    def __init__(self, embedding_dim: int, dim_proj: int, dropout_prob: float, skip_connections: bool, aggregation_fn: Enum, num_mp_layers: int):
+    def __init__(self, embedding_dim: int, dropout_prob: float, skip_connections: bool, aggregation_fn: Enum, num_mp_layers: int):
         super(nge, self).__init__()
 
         self.parallel_encoder = nn.Linear(2, embedding_dim)
@@ -195,7 +195,7 @@ class nge(nn.Module):
         self.sequential_termination_global = nn.Linear(embedding_dim, 2, bias=False)
         self.sequential_termination_bias = mx.random.normal([2])
     
-        self.processor = mpnn(embedding_dim, dim_proj, dropout_prob, skip_connections, aggregation_fn, num_mp_layers)
+        self.processor = mpnn(embedding_dim, dropout_prob, skip_connections, aggregation_fn, num_mp_layers)
 
     def __call__(self, data, task_type):
         node_embeddings, connection_matrix = data
