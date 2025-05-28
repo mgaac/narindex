@@ -13,7 +13,7 @@ import mlx.optimizers as optim
 
 from model import GAT
 from utils.common import standard_arg_parser, cross_entropy_loss_fn, accuracy_fn, print_model_summary, setup_reproducibility
-from utils.datasets.CORA.data.cora import load_cora_data, get_cora_config
+from utils.datasets.CORA.cora import load_cora_data, get_cora_config
 
 
 def create_gat_arg_parser():
