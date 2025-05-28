@@ -295,7 +295,8 @@ def run_experiment(args):
     
     # Create custom progress tracking
     epoch_pbar = tqdm(range(args.epochs), desc="Training NGE", unit="epoch",
-                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}',
+                      position=0, leave=True)
     
     for epoch in range(args.epochs):
         # Training phase
@@ -326,11 +327,20 @@ def run_experiment(args):
         train_history.append(avg_train_loss)
         val_history.append(avg_val_loss)
         
-        # Update progress with deltas
+        # Early stopping check
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_epoch = epoch
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        
+        # Update progress bar description with current epoch info
+        desc = f"Epoch {epoch + 1}/{args.epochs} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | Best: {best_val_loss:.4f} (ep {best_epoch + 1})"
+        epoch_pbar.set_description(desc)
+        
+        # Update progress with additional details in postfix
         postfix_dict = {
-            'train_loss': f"{avg_train_loss:.4f}",
-            'val_loss': f"{avg_val_loss:.4f}",
-            'best_epoch': best_epoch + 1,
             'patience': f"{patience_counter}/{args.patience}"
         }
         
@@ -340,25 +350,14 @@ def run_experiment(args):
         
         epoch_pbar.set_postfix(postfix_dict)
         
-        # Early stopping check
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            best_epoch = epoch
-            patience_counter = 0
-        else:
-            patience_counter += 1
-        
         if patience_counter >= args.patience:
-            epoch_pbar.set_description("Early stopping")
-            print(f"\nEarly stopping triggered at epoch {epoch + 1}")
+            epoch_pbar.set_description("Early stopping triggered")
+            epoch_pbar.write(f"Early stopping triggered at epoch {epoch + 1}")
             break
         
         # Update previous values
         prev_train_loss = avg_train_loss
         prev_val_loss = avg_val_loss
-        
-        # Print per-epoch summary
-        print(f"\nEpoch {epoch + 1}/{args.epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Best: {best_val_loss:.4f} (epoch {best_epoch + 1})")
         
         epoch_pbar.update(1)
     
