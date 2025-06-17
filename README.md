@@ -22,10 +22,6 @@ python experiment.py --total-steps 2000 --learning-rate 0.003
 # Message Passing Neural Networks (MPNN) 
 cd implementations/mpgnn
 python experiment.py --aggregation max --total-steps 2000
-
-# Neural Turing Machines (NTM) copy task
-cd implementations/ntm
-python experiment.py --iterations 20000 --sequence-length 10
 ```
 
 All experiments include detailed parameter options via `--help`.
