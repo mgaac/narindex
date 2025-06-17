@@ -10,9 +10,14 @@ Usage:
 
 import argparse
 import os
+import sys
 import csv
 import json
 from pathlib import Path
+
+# Add the root directory to Python path for utils import
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim

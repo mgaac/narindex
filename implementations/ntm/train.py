@@ -5,7 +5,11 @@ Uses standardized utilities while maintaining specialized NTM functionality.
 
 import sys
 import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+# Add the root directory to Python path for utils import
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -21,6 +25,20 @@ import random
 import argparse
 from tqdm import tqdm
 
+# Configuration parameters for backward compatibility with experiment.py
+network_param = {
+    'memory_size': [64, 10],  # [memory_rows, memory_cols]  
+    'hdim': 64,  # hidden dimension
+    'numl_shared': 10,  # number of shared layers
+    'numl_con': 10,  # number of controller layers
+    'numl_out': 10,  # number of output layers
+}
+
+train_param = {
+    'learning_rate': 6e-5,
+    'num_steps': 10000,
+    'log_interval': 1000
+}
 
 def create_ntm_arg_parser():
     """Create argument parser with NTM-specific options."""
@@ -91,6 +109,10 @@ def copy_task_data_generator(max_sequence_length: int, element_length: int):
 def binary_cross_entropy_loss(logits, targets):
     """Binary cross-entropy loss for copy task."""
     return nn.losses.binary_cross_entropy(logits, targets)
+
+
+# Loss function alias for backward compatibility
+loss_fn = binary_cross_entropy_loss
 
 
 def copy_task_accuracy(logits, targets):
