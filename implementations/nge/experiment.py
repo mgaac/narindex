@@ -157,7 +157,7 @@ def debug_algorithm_execution(trainer, dataset, task_types):
                 if task_type_int == 0:  # PARALLEL_ALGORITHM
                     pred_state, pred_distance, pred_pred = output
                     pred_state_disp = safe_argmax(pred_state)
-                    pred_distance_disp = safe_argmax(pred_distance)
+                    pred_distance_disp = np.array(pred_distance).flatten()
                     pred_pred_disp = safe_argmax(pred_pred)
                     print(f"Pred State:    {pred_state_disp}")
                     print(f"Pred Dist:     {pred_distance_disp}")

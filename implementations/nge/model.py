@@ -173,7 +173,7 @@ class decoder(nn.Module):
             return prim_state_predictions, predesecor_predictions
         elif (self.task_type == PARALLEL_ALGORITHM):
             bfs_state_predictions = self.bfs_state_outputs(node_embeddings)
-            bf_distance_predictions = self.bfs_distance_outputs(node_embeddings)
+            bf_distance_predictions = nn.relu(self.bfs_distance_outputs(node_embeddings))
 
             return bfs_state_predictions, bf_distance_predictions, predesecor_predictions
     
