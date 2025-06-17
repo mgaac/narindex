@@ -13,6 +13,24 @@ A proto-index, perhaps, abiding by today's zeitgeist, a sort of worklog. An atte
 |Counterfactual G-invariance regularization| *Backlog* |
 
 
+### Usage
+```bash
+# Graph Attention Networks (GAT) on CORA dataset
+cd implementations/gat
+python experiment.py --total-steps 2000 --learning-rate 0.003
+
+# Message Passing Neural Networks (MPNN) 
+cd implementations/mpgnn
+python experiment.py --aggregation max --total-steps 2000
+
+# Neural Turing Machines (NTM) copy task
+cd implementations/ntm
+python experiment.py --iterations 20000 --sequence-length 10
+```
+
+All experiments include detailed parameter options via `--help`.
+
+
 ### Neural Turing Machines
 More than anything, I am now convinced that Neural Turing Machines (NTMs) reflect the will of their creators to somehow manage the ungodly gradient dynamics that emerge during training—especially in the feedforward variant. This challenge is made worse not only by the scarcity of open-source implementations but, more surprisingly, by the near absence of substantial literature investigating them. Many hours were spent, nonetheless, modifying the architecture and training loop in hopes of replicating the original paper’s findings. This aim, however, was not achieved, partly due to serendipitous gradient collapses to NaN, and partly due to insufficient access to compute resources. Intuitively, it seems that the tasks we expect MLPs to perform under this paradigm lie right at the boundary of their representational capacity. Or perhaps more accurately, these are tasks for which the inductive biases inherent in traditional MLP architectures are fundamentally ill-suited, making their training a maximally sample-complex regime. It does feel odd, though, that so little is said about them, particularly given how intuitive they seem as a natural extension of regular feedforward networks.
 
@@ -23,3 +41,4 @@ Naively, I never put much thought into learning PyTorch (same goes for MLX). Tha
 
 
 
+  
