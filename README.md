@@ -6,7 +6,7 @@ A proto-index, perhaps, abiding by today's zeitgeist, a sort of worklog. An atte
 | --- | --- |
 | Neural Turing Machines | Unsuccessful |
 | Graph Attention Networks | 83% acc. (CORA) |
-| Message Passing Neural Networks | 80% acc (CORA) |
+| Message Passing Neural Networks | 80% acc (CORA, MAX) |
 | Neural Execution Networks | **Training** |
 | Generalist Neural Algorithmic Learner | *Backlog* |
 | Graph Variational Autoencoder | *Backlog* |
