@@ -1,7 +1,10 @@
 """
-Message Passing Neural Network (MPNN) implementation in MLX.
-Based on "Neural Message Passing for Quantum Chemistry" (Gilmer et al., 2017)
-arXiv:1704.01212v2
+Message Passing Neural Network (MPNN) Model
+
+Paper: "Neural Message Passing for Quantum Chemistry" (Gilmer et al., 2017)
+       arXiv:1704.01212v2
+
+Implements configurable message passing with multiple aggregation functions.
 """
 
 import mlx.core as mx
@@ -19,7 +22,7 @@ class AggregationFunction(Enum):
 
 
 class MessagePassingLayer(nn.Module):
-    """Single message passing layer."""
+    """Single message passing layer with configurable aggregation."""
     
     def __init__(
         self, 
@@ -49,7 +52,7 @@ class MessagePassingLayer(nn.Module):
         self.skip_connections = skip_connections
         self.aggregation_fn = aggregation_fn
         
-        # Message functions (learnable parameters)
+        # Message functions
         self.source_message_fn = mx.random.normal([1, embedding_dim, dim_proj])
         self.target_message_fn = mx.random.normal([1, embedding_dim, dim_proj])
         
@@ -61,7 +64,7 @@ class MessagePassingLayer(nn.Module):
     
     def __call__(self, connection_matrix: mx.array, node_embeddings: mx.array) -> mx.array:
         """
-        Forward pass of message passing layer.
+        Forward pass.
         
         Args:
             connection_matrix: Edge indices [2, num_edges]
@@ -70,12 +73,11 @@ class MessagePassingLayer(nn.Module):
         Returns:
             Updated node embeddings [num_nodes, embedding_dim]
         """
-        # Apply edge dropout (for regularization)
+        # Apply edge dropout during training
         if self.training:
             mask = mx.random.bernoulli(1 - self.dropout_prob, connection_matrix.shape)
             connection_matrix = connection_matrix * mask
         
-        # Apply node dropout
         node_embeddings = self.dropout(node_embeddings)
         
         source_idx = connection_matrix[0]
@@ -85,12 +87,10 @@ class MessagePassingLayer(nn.Module):
         source_embeddings = node_embeddings @ self.source_message_fn
         target_embeddings = node_embeddings @ self.target_message_fn
         
-        # Get edge-filtered embeddings
-        filtered_source_embeddings = mx.take(source_embeddings, source_idx, axis=1)
-        filtered_target_embeddings = mx.take(target_embeddings, target_idx, axis=1)
+        filtered_source = mx.take(source_embeddings, source_idx, axis=1)
+        filtered_target = mx.take(target_embeddings, target_idx, axis=1)
         
-        # Combine source and target messages
-        message = filtered_source_embeddings + filtered_target_embeddings
+        message = filtered_source + filtered_target
         message = self.relu(message)
         
         # Aggregate messages
@@ -109,18 +109,17 @@ class MessagePassingLayer(nn.Module):
         
         # Update node embeddings
         agg_message = self.dropout(agg_message)
-        new_node_embeddings = self.update_fn(agg_message)
-        new_node_embeddings = self.relu(new_node_embeddings)
+        new_embeddings = self.update_fn(agg_message)
+        new_embeddings = self.relu(new_embeddings)
         
-        # Apply skip connection
         if self.skip_connections:
-            new_node_embeddings = new_node_embeddings + node_embeddings
+            new_embeddings = new_embeddings + node_embeddings
         
-        return new_node_embeddings
+        return new_embeddings
 
 
 class MPNN(nn.Module):
-    """Message Passing Neural Network (MPNN) model."""
+    """Message Passing Neural Network model."""
     
     def __init__(
         self, 
@@ -151,15 +150,13 @@ class MPNN(nn.Module):
         super().__init__()
         
         self.embedding_dim = embedding_dim
-        self.dim_proj = dim_proj
-        self.num_nodes = num_nodes
-        self.dropout_prob = dropout_prob
-        self.skip_connections = skip_connections
-        self.aggregation_fn = aggregation_fn
         
         # Message passing layers
         self.mp_layers = [
-            MessagePassingLayer(num_nodes, embedding_dim, dim_proj, dropout_prob, skip_connections, aggregation_fn)
+            MessagePassingLayer(
+                num_nodes, embedding_dim, dim_proj, 
+                dropout_prob, skip_connections, aggregation_fn
+            )
             for _ in range(num_mp_layers)
         ]
         
@@ -171,7 +168,7 @@ class MPNN(nn.Module):
     
     def __call__(self, data: Tuple[mx.array, mx.array]) -> mx.array:
         """
-        Forward pass of MPNN model.
+        Forward pass.
         
         Args:
             data: Tuple of (node_embeddings, connection_matrix)
@@ -181,25 +178,17 @@ class MPNN(nn.Module):
         """
         node_embeddings, connection_matrix = data
         
-        # Validate input dimensions
         if node_embeddings.shape[1] != self.embedding_dim:
             raise ValueError(
-                f'Incorrect node embedding size. Expected {self.embedding_dim}, '
-                f'got {node_embeddings.shape[1]}'
+                f'Expected embedding dim {self.embedding_dim}, got {node_embeddings.shape[1]}'
             )
         
         # Apply message passing layers
-        for mp_layer in self.mp_layers:
-            node_embeddings = mp_layer(connection_matrix, node_embeddings)
+        for layer in self.mp_layers:
+            node_embeddings = layer(connection_matrix, node_embeddings)
         
         # Apply output layers
-        for out_layer in self.out_layers:
-            node_embeddings = out_layer(node_embeddings)
+        for layer in self.out_layers:
+            node_embeddings = layer(node_embeddings)
         
         return node_embeddings
-
-
-# Aliases for backward compatibility
-aggregation_fn = AggregationFunction
-mp_layer = MessagePassingLayer
-mpnn = MPNN

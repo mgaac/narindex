@@ -1,7 +1,10 @@
 """
-Graph Attention Network (GAT) implementation in MLX.
-Based on "Graph Attention Networks" (Veličković et al., 2017)
-arXiv:1710.10903v3
+Graph Attention Network (GAT) Model
+
+Paper: "Graph Attention Networks" (Veličković et al., 2017)
+       arXiv:1710.10903v3
+
+Implements multi-head attention mechanism for graph neural networks.
 """
 
 import mlx.core as mx
@@ -10,9 +13,15 @@ from typing import Tuple
 
 
 class GATLayer(nn.Module):
-    """Single Graph Attention Network layer."""
+    """Single Graph Attention Network layer with multi-head attention."""
     
-    def __init__(self, num_nodes: int, dim_proj: int, num_att_heads: int, dropout_prob: float):
+    def __init__(
+        self, 
+        num_nodes: int, 
+        dim_proj: int, 
+        num_att_heads: int, 
+        dropout_prob: float
+    ):
         """
         Initialize GAT layer.
         
@@ -28,7 +37,7 @@ class GATLayer(nn.Module):
         self.num_nodes = num_nodes
         self.num_att_heads = num_att_heads
         
-        # Attention score parameters (learnable)
+        # Attention score parameters
         self.source_scores_fn = mx.random.normal([1, num_att_heads, dim_proj])
         self.target_scores_fn = mx.random.normal([1, num_att_heads, dim_proj])
         
@@ -37,7 +46,7 @@ class GATLayer(nn.Module):
     
     def __call__(self, node_proj: mx.array, adjacency_matrix: mx.array) -> mx.array:
         """
-        Forward pass of GAT layer.
+        Forward pass.
         
         Args:
             node_proj: Node projections [num_nodes, num_heads * dim_proj]
@@ -57,34 +66,34 @@ class GATLayer(nn.Module):
         target_scores = (node_proj * self.target_scores_fn).sum(axis=-1)
         
         # Get edge-filtered projections and scores
-        edge_filtered_node_proj = mx.take(node_proj, source_idx, axis=0)
-        edge_filtered_source_scores = mx.take(source_scores, source_idx, axis=0)
-        edge_filtered_target_scores = mx.take(target_scores, target_idx, axis=0)
+        edge_filtered_proj = mx.take(node_proj, source_idx, axis=0)
+        edge_filtered_source = mx.take(source_scores, source_idx, axis=0)
+        edge_filtered_target = mx.take(target_scores, target_idx, axis=0)
         
         # Compute edge attention scores
-        edge_scores = self.leaky_relu(edge_filtered_source_scores + edge_filtered_target_scores)
+        edge_scores = self.leaky_relu(edge_filtered_source + edge_filtered_target)
         edge_scores = (edge_scores - edge_scores.max()).exp()
         
         # Compute softmax normalization
-        softmax_denominator = mx.zeros([self.num_nodes, self.num_att_heads])
-        softmax_denominator = softmax_denominator.at[target_idx].add(edge_scores)
-        softmax_denominator = mx.take(softmax_denominator, target_idx, axis=0)
+        softmax_denom = mx.zeros([self.num_nodes, self.num_att_heads])
+        softmax_denom = softmax_denom.at[target_idx].add(edge_scores)
+        softmax_denom = mx.take(softmax_denom, target_idx, axis=0)
         
         # Apply attention and dropout
-        attention_scores = edge_scores / (softmax_denominator + 1e-16)
+        attention_scores = edge_scores / (softmax_denom + 1e-16)
         attention_scores = self.dropout(attention_scores)
         
         # Aggregate messages
-        edge_filtered_node_proj = edge_filtered_node_proj * mx.expand_dims(attention_scores, axis=-1)
-        new_node_proj = mx.zeros([self.num_nodes, self.num_att_heads, self.dim_proj])
-        new_node_proj = new_node_proj.at[target_idx].add(edge_filtered_node_proj)
-        new_node_proj = self.leaky_relu(new_node_proj)
+        edge_filtered_proj = edge_filtered_proj * mx.expand_dims(attention_scores, axis=-1)
+        new_proj = mx.zeros([self.num_nodes, self.num_att_heads, self.dim_proj])
+        new_proj = new_proj.at[target_idx].add(edge_filtered_proj)
+        new_proj = self.leaky_relu(new_proj)
         
-        return new_node_proj.reshape((self.num_nodes, self.num_att_heads * self.dim_proj))
+        return new_proj.reshape((self.num_nodes, self.num_att_heads * self.dim_proj))
 
 
 class GAT(nn.Module):
-    """Graph Attention Network (GAT) model."""
+    """Graph Attention Network model."""
     
     def __init__(
         self, 
@@ -142,7 +151,7 @@ class GAT(nn.Module):
     
     def __call__(self, data: Tuple[mx.array, mx.array]) -> mx.array:
         """
-        Forward pass of GAT model.
+        Forward pass.
         
         Args:
             data: Tuple of (node_embeddings, adjacency_matrix)
@@ -152,11 +161,9 @@ class GAT(nn.Module):
         """
         node_embeddings, adjacency_matrix = data
         
-        # Validate input dimensions
         if node_embeddings.shape[1] != self.dim_embed:
             raise ValueError(
-                f'Incorrect node embedding size. Expected {self.dim_embed}, '
-                f'got {node_embeddings.shape[1]}'
+                f'Expected embedding dim {self.dim_embed}, got {node_embeddings.shape[1]}'
             )
         
         # Input dropout and projection
@@ -166,10 +173,10 @@ class GAT(nn.Module):
         
         # Apply GAT layers
         for layer in self.gat_layers:
-            new_node_proj = layer(node_proj, adjacency_matrix)
+            new_proj = layer(node_proj, adjacency_matrix)
             if self.skip_connections:
-                new_node_proj += node_proj
-            node_proj = new_node_proj
+                new_proj = new_proj + node_proj
+            node_proj = new_proj
         
         # Average across attention heads
         node_proj = node_proj.reshape(node_proj.shape[0], self.num_att_heads, self.dim_proj)
@@ -180,7 +187,3 @@ class GAT(nn.Module):
             node_proj = layer(node_proj)
         
         return node_proj
-
-
-# Alias for backward compatibility
-gat = GAT

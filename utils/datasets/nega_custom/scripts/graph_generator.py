@@ -9,7 +9,7 @@ from collections import defaultdict
 from enum import Enum
 
 class task(Enum):
-    PARALLEL_ALGORIHTM = 0
+    PARALLEL_ALGORITHM = 0
     SEQUENTIAL_ALGORITHM = 1
 
 def binary_to_one_hot(binary_states):
@@ -319,7 +319,7 @@ def prim_edge_list(edges, start):
     return history
 
 def generate_targets(graph, start, task_type):
-    if task_type == task.PARALLEL_ALGORIHTM:
+    if task_type == task.PARALLEL_ALGORITHM:
         bfs = bfs_edge_list(graph, start)
         bf = bellman_ford_edge_list(graph, start)
         bf_dist = mx.array([list(h['distance'].values()) for h in bf])

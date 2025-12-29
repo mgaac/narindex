@@ -1,166 +1,250 @@
+"""Utility functions for Neural Graph Execution (NGE) training.
+
+Provides accuracy metrics calculation, loss computation, and debugging utilities.
+"""
+
 import mlx.core as mx
 import mlx.nn as nn
+import mlx.utils as utils
 import numpy as np
-from enum import Enum
-
-# Task enumeration (needed for logging)
-class task(Enum):
-    PARALLEL_ALGORITHM=0
-    SEQUENTIAL_ALGORITHM=1
-
-def calculate_accuracy_metrics(state, predesecor, reachability_target, predesecor_target, 
-                             termination_prob, termination_target, distance=None, distance_target=None):
-    """Calculate accuracy metrics for all task components"""
-    metrics = {}
-    
-    # State accuracy (binary classification)
-    state_pred = mx.argmax(state, axis=1)
-    state_targ = mx.argmax(reachability_target, axis=1)
-    state_acc = float(mx.mean((state_pred == state_targ).astype(mx.float32)))
-    metrics['state_acc'] = state_acc
-    
-    # Predecessor accuracy (multi-class classification)
-    pred_pred = mx.argmax(predesecor, axis=1)
-    pred_acc = float(mx.mean((pred_pred == predesecor_target).astype(mx.float32)))
-    metrics['pred_acc'] = pred_acc
-    
-    # Termination accuracy (binary classification)
-    term_pred = mx.argmax(termination_prob, axis=0 if termination_prob.ndim == 1 else 1)
-    term_targ = mx.argmax(termination_target, axis=0 if termination_target.ndim == 1 else 1)
-    term_acc = float((term_pred == term_targ).astype(mx.float32))
-    metrics['term_acc'] = term_acc
-    
-    # Distance accuracy (for parallel algorithms only)
-    if distance is not None and distance_target is not None:
-        # For distance, we calculate MAE and also a threshold-based accuracy
-        distance_mae = float(mx.mean(mx.abs(distance.flatten() - distance_target.flatten())))
-        # Consider distance "accurate" if within 10% of target (or 0.1 absolute for small values)
-        distance_thresh = mx.maximum(mx.abs(distance_target.flatten()) * 0.1, 0.1)
-        distance_within_thresh = mx.abs(distance.flatten() - distance_target.flatten()) <= distance_thresh
-        distance_acc = float(mx.mean(distance_within_thresh.astype(mx.float32)))
-        metrics['dist_mae'] = distance_mae
-        metrics['dist_acc'] = distance_acc
-    
-    return metrics
-
-class SimpleLogger:
-    """Minimal logger with optional debug mode and accuracy tracking"""
-    def __init__(self, debug=False):
-        self.debug = debug
-        # Track accuracy metrics for each epoch
-        self.train_metrics = []
-        self.val_metrics = []
-        self.step_metrics = {'train': [], 'val': []}
-    
-    def start_epoch(self, epoch, num_epochs, total_graphs):
-        """Start epoch (no progress bar)"""
-        # Reset step metrics for new epoch
-        self.step_metrics = {'train': [], 'val': []}
-    
-    def update_progress(self, train_loss=None, val_loss=None):
-        """Update progress (no progress bar)"""
-        pass
-    
-    def log_step_metrics(self, metrics, phase='train'):
-        """Log metrics for a single step"""
-        self.step_metrics[phase].append(metrics)
-    
-    def _average_metrics(self, metrics_list):
-        """Average a list of metric dictionaries"""
-        if not metrics_list:
-            return {}
-        
-        # Get all keys from first metrics dict
-        keys = metrics_list[0].keys()
-        averaged = {}
-        
-        for key in keys:
-            values = [m[key] for m in metrics_list if key in m]
-            if values:
-                averaged[key] = sum(values) / len(values)
-        
-        return averaged
-    
-    def log_epoch(self, epoch, train_loss, val_loss):
-        """Log epoch results with accuracy metrics"""
-        # Calculate average metrics for the epoch
-        train_metrics = self._average_metrics(self.step_metrics['train'])
-        val_metrics = self._average_metrics(self.step_metrics['val'])
-        
-        # Store metrics
-        self.train_metrics.append(train_metrics)
-        self.val_metrics.append(val_metrics)
-        
-        # Print epoch summary
-        print(f"Epoch {epoch + 1}:")
-        print(f"  Losses - Train: {train_loss:.4f}, Val: {val_loss:.4f}")
-        
-        # Print accuracy metrics if available
-        if train_metrics:
-            print(f"  Train Acc - State: {train_metrics.get('state_acc', 0):.3f}, "
-                  f"Pred: {train_metrics.get('pred_acc', 0):.3f}, "
-                  f"Term: {train_metrics.get('term_acc', 0):.3f}", end="")
-            if 'dist_acc' in train_metrics:
-                print(f", Dist: {train_metrics.get('dist_acc', 0):.3f} (MAE: {train_metrics.get('dist_mae', 0):.3f})", end="")
-            print()
-        
-        if val_metrics:
-            print(f"  Val Acc   - State: {val_metrics.get('state_acc', 0):.3f}, "
-                  f"Pred: {val_metrics.get('pred_acc', 0):.3f}, "
-                  f"Term: {val_metrics.get('term_acc', 0):.3f}", end="")
-            if 'dist_acc' in val_metrics:
-                print(f", Dist: {val_metrics.get('dist_acc', 0):.3f} (MAE: {val_metrics.get('dist_mae', 0):.3f})", end="")
-            print()
-    
-    def log_final(self, best_val_loss, best_epoch):
-        """Log final training results"""
-        print(f"Best validation loss: {best_val_loss:.4f} at epoch {best_epoch + 1}")
-        
-        # Print best validation accuracies if available
-        if best_epoch < len(self.val_metrics) and self.val_metrics[best_epoch]:
-            best_metrics = self.val_metrics[best_epoch]
-            print(f"Best validation accuracies:")
-            print(f"  State: {best_metrics.get('state_acc', 0):.3f}, "
-                  f"Pred: {best_metrics.get('pred_acc', 0):.3f}, "
-                  f"Term: {best_metrics.get('term_acc', 0):.3f}", end="")
-            if 'dist_acc' in best_metrics:
-                print(f", Dist: {best_metrics.get('dist_acc', 0):.3f}")
-            else:
-                print()
-    
-    def log_debug_info(self, state, predesecor, reachability_target, predesecor_target, 
-                      termination_prob, termination_target, distance=None, distance_target=None, task_type=None):
-        """Print debug information if debug mode is enabled"""
-        if not self.debug:
-            return
-            
-        task_name = "SEQ" if task_type == task.SEQUENTIAL_ALGORITHM else "PAR"
-        print(f"  DEBUG ({task_name}):")
-        print(f"    Pred: {np.array(mx.argmax(predesecor, axis=1))}")
-        print(f"    Targ: {np.array(predesecor_target)}")
-        print(f"    State: {np.array(mx.argmax(state, axis=1))}")
-        print(f"    S_Targ: {np.array(mx.argmax(reachability_target, axis=1))}")
-        
-        if distance is not None and distance_target is not None:
-            print(f"    Dist: {np.array(distance.flatten())}")
-            print(f"    D_Targ: {np.array(distance_target.flatten())}")
-        
-        print(f"    Term: {float(mx.softmax(termination_prob, axis=0)[1]):.3f}")
 
 
-def count_parameters(model):
-    """Count model parameters"""
-    def count_params(tree):
-        if isinstance(tree, dict):
-            return sum(count_params(v) for v in tree.values())
-        elif hasattr(tree, 'size'):
-            return tree.size
+def extract_per_head_magnitude_grads(grads):
+    """Extract the L2 norm of gradients for each model component.
+    
+    Args:
+        grads: Gradient tree from value_and_grad
+        
+    Returns:
+        Dictionary mapping component names to gradient magnitudes
+    """
+    head_names = set()
+    utils.tree_map_with_path(lambda path, _: head_names.add(path.split('.')[0]), grads)
+    
+    per_head_magnitude_grads = {}
+    for head_name in head_names:
+        per_head_magnitude_grads[head_name] = utils.tree_reduce(
+            lambda acc, x: acc + mx.sum(mx.square(x)), grads[head_name], 0.0
+        ) ** 0.5
+    return per_head_magnitude_grads
+
+
+def calculate_losses_and_accuracies(model, graph_data, embedding_dim: int):
+    """Calculate losses and accuracies for a single graph.
+    
+    Follows the exact loss computation logic from the training loop.
+    
+    Args:
+        model: NGE model
+        graph_data: Dictionary containing graph data and targets
+        embedding_dim: Model embedding dimension
+        
+    Returns:
+        Tuple of (aux_losses[5], total_loss, accuracies[5])
+    """
+    accumulated_loss = mx.array(0.0)
+    accumulated_aux_losses = mx.zeros([5])  # [bf_dist, bf_pred, bfs_state, bf_term, bfs_term]
+    
+    # Accuracy counters - accumulate across all steps
+    bf_distance_correct_sum = 0
+    bf_distance_total_sum = 0
+    bf_predecessor_correct_sum = 0
+    bf_predecessor_total_sum = 0
+    bfs_state_correct_sum = 0
+    bfs_state_total_sum = 0
+    bf_termination_correct_sum = 0
+    bf_termination_total_sum = 0
+    bfs_termination_correct_sum = 0
+    bfs_termination_total_sum = 0
+    
+    num_nodes = graph_data['num_nodes']
+    previous_step_hidden_states = mx.zeros([num_nodes, 2 * embedding_dim])
+    
+    num_bf_steps = len(graph_data['bf_distance_targets'])
+    num_bfs_steps = len(graph_data['bfs_state_targets'])
+    num_steps = max(num_bf_steps, num_bfs_steps)
+    
+    for i in range(num_steps):
+        # Check if samples exist
+        bf_sample_exists = (i + 1) < num_bf_steps
+        bfs_sample_exists = (i + 1) < num_bfs_steps
+        
+        if not (bf_sample_exists or bfs_sample_exists):
+            continue
+        
+        # Prepare data
+        if bfs_sample_exists:
+            true_bfs_state = graph_data['bfs_state_targets'][i]
+            target_bfs_state = graph_data['bfs_state_targets'][i + 1]
         else:
-            return 0
-    return count_params(model.parameters())
+            true_bfs_state = graph_data['bfs_state_targets'][-1]
+            target_bfs_state = graph_data['bfs_state_targets'][-1]
+        
+        if bf_sample_exists:
+            true_distance_bf = graph_data['bf_distance_targets'][i]
+            target_distance_bf = graph_data['bf_distance_targets'][i + 1]
+            target_predecessor_bf = graph_data['bf_predecessor_targets'][i + 1]
+        else:
+            true_distance_bf = graph_data['bf_distance_targets'][-1]
+            target_distance_bf = graph_data['bf_distance_targets'][-1]
+            target_predecessor_bf = graph_data['bf_predecessor_targets'][-1]
+        
+        # Generate termination targets
+        is_last_bf_step = (i + 1) == (num_bf_steps - 1)
+        is_last_bfs_step = (i + 1) == (num_bfs_steps - 1)
+        termination_targets = {
+            'bf': mx.array(1.0 if is_last_bf_step else 0.0),
+            'bfs': mx.array(1.0 if is_last_bfs_step else 0.0)
+        }
+        
+        # Prepare model inputs
+        node_algo_features = mx.stack([true_bfs_state, true_distance_bf], axis=1)
+        input_embeddings = mx.concatenate([previous_step_hidden_states, node_algo_features], axis=1)
+        model_input = (input_embeddings, graph_data['edge_matrix'])
+        
+        # Forward pass
+        bfs_output, bf_output, termination_probs, processed_embeddings = model(model_input)
+        
+        # Compute losses and accuracies
+        if bf_sample_exists:
+            bf_distance_predictions, bf_predecessor_predictions = bf_output
+            
+            # BF Distance Loss
+            bf_distance_loss = nn.losses.mse_loss(
+                bf_distance_predictions, target_distance_bf, reduction='mean'
+            )
+            
+            # BF Distance Accuracy
+            distance_errors = mx.abs(bf_distance_predictions - target_distance_bf)
+            distance_tolerance = 0.1  # 10% tolerance on normalized scale
+            distance_correct = mx.sum(distance_errors <= distance_tolerance).item()
+            bf_distance_correct_sum += distance_correct
+            bf_distance_total_sum += num_nodes
+            
+            # BF Predecessor Loss
+            valid_mask = (target_predecessor_bf != -1)
+            safe_targets = mx.where(valid_mask, target_predecessor_bf, mx.zeros_like(target_predecessor_bf))
+            
+            # Only compute loss if we have valid targets
+            if mx.sum(valid_mask) > 0:
+                per_node_ce = nn.losses.cross_entropy(
+                    bf_predecessor_predictions, safe_targets, reduction='none', label_smoothing=1e-6
+                )
+                valid_mask_f = valid_mask.astype(mx.float32)
+                denom = mx.maximum(valid_mask_f.sum(), mx.array(1.0))
+                bf_predecessor_loss = (per_node_ce * valid_mask_f).sum() / denom
+            else:
+                bf_predecessor_loss = mx.array(0.0)
+            
+            # BF Predecessor Accuracy - only count valid nodes
+            pred_argmax = mx.argmax(bf_predecessor_predictions, axis=-1)
+            pred_correct = mx.sum((pred_argmax == target_predecessor_bf) & valid_mask).item()
+            pred_total = mx.sum(valid_mask).item()
+            bf_predecessor_correct_sum += pred_correct
+            bf_predecessor_total_sum += pred_total
+            
+            # BF Termination Loss
+            bf_termination_loss = nn.losses.binary_cross_entropy(
+                termination_probs['bf'], termination_targets['bf'], reduction='mean', with_logits=True
+            )
+            
+            # BF Termination Accuracy
+            bf_term_prob = mx.sigmoid(termination_probs['bf'])
+            bf_term_pred = (bf_term_prob > 0.5).astype(mx.float32)
+            bf_term_correct = (bf_term_pred == termination_targets['bf']).item()
+            bf_termination_correct_sum += bf_term_correct
+            bf_termination_total_sum += 1
+        else:
+            bf_distance_loss = mx.array(0.0)
+            bf_predecessor_loss = mx.array(0.0)
+            bf_termination_loss = mx.array(0.0)
+        
+        if bfs_sample_exists:
+            # BFS State Loss
+            bfs_state_loss = nn.losses.binary_cross_entropy(
+                bfs_output, target_bfs_state, reduction='mean', with_logits=True
+            )
+            
+            # BFS State Accuracy
+            bfs_state_probs = mx.sigmoid(bfs_output)
+            bfs_state_pred = (bfs_state_probs > 0.5).astype(mx.float32)
+            bfs_correct = mx.sum(bfs_state_pred == target_bfs_state).item()
+            bfs_state_correct_sum += bfs_correct
+            bfs_state_total_sum += num_nodes
+            
+            # BFS Termination Loss
+            bfs_termination_loss = nn.losses.binary_cross_entropy(
+                termination_probs['bfs'], termination_targets['bfs'], reduction='mean', with_logits=True
+            )
+            
+            # BFS Termination Accuracy
+            bfs_term_prob = mx.sigmoid(termination_probs['bfs'])
+            bfs_term_pred = (bfs_term_prob > 0.5).astype(mx.float32)
+            bfs_term_correct = (bfs_term_pred == termination_targets['bfs']).item()
+            bfs_termination_correct_sum += bfs_term_correct
+            bfs_termination_total_sum += 1
+        else:
+            bfs_state_loss = mx.array(0.0)
+            bfs_termination_loss = mx.array(0.0)
+        
+        # Accumulate losses
+        raw_losses = mx.array([
+            bf_distance_loss, bf_predecessor_loss, bfs_state_loss,
+            bf_termination_loss, bfs_termination_loss
+        ])
+        total_step_loss = mx.sum(raw_losses)
+        accumulated_loss += total_step_loss
+        accumulated_aux_losses += raw_losses
+        
+        # Update hidden states for next step
+        previous_step_hidden_states = processed_embeddings
+    
+    # Calculate averages
+    bf_steps = max(num_bf_steps - 1, 0)
+    bfs_steps = max(num_bfs_steps - 1, 0)
+    effective_steps = max(bf_steps, bfs_steps, 1)
+    
+    average_loss = accumulated_loss / effective_steps
+    
+    # Per-task averaging
+    per_task_counter = mx.array([
+        max(bf_steps, 1),   # bf_distance
+        max(bf_steps, 1),   # bf_predecessor
+        max(bfs_steps, 1),  # bfs_state
+        max(bf_steps, 1),   # bf_termination
+        max(bfs_steps, 1),  # bfs_termination
+    ], dtype=mx.float32)
+    avg_aux_losses = accumulated_aux_losses / per_task_counter
+    
+    # Calculate overall accuracies
+    bf_distance_acc = bf_distance_correct_sum / max(bf_distance_total_sum, 1)
+    bf_predecessor_acc = bf_predecessor_correct_sum / max(bf_predecessor_total_sum, 1)
+    bfs_state_acc = bfs_state_correct_sum / max(bfs_state_total_sum, 1)
+    bf_termination_acc = bf_termination_correct_sum / max(bf_termination_total_sum, 1)
+    bfs_termination_acc = bfs_termination_correct_sum / max(bfs_termination_total_sum, 1)
+    
+    accuracies = mx.array([
+        bf_distance_acc, bf_predecessor_acc, bfs_state_acc,
+        bf_termination_acc, bfs_termination_acc
+    ])
+    
+    return avg_aux_losses, average_loss, accuracies
+
+
+def count_parameters(model) -> int:
+    """Count total model parameters."""
+    def _count(params):
+        total = 0
+        if isinstance(params, dict):
+            for v in params.values():
+                total += _count(v)
+        elif hasattr(params, 'size'):
+            total += params.size
+        return total
+    return _count(model.parameters())
 
 
 def print_model_info(model):
-    """Print basic model information"""
+    """Print basic model information."""
     param_count = count_parameters(model)
-    print(f"Model parameters: {param_count:,}") 
+    print(f"Model parameters: {param_count:,}")

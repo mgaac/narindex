@@ -1,403 +1,209 @@
 #!/usr/bin/env python3
-"""
-Neural Execution of Graph Algorithms (NGE) Experiment Runner
-Neural Graph Execution for Algorithmic Reasoning
+"""Neural Execution of Graph Algorithms (NGE) Experiment Runner
+
+Paper: Neural Execution of Graph Algorithms
+
+Learns to execute Bellman-Ford (shortest paths) and BFS (reachability)
+algorithms using a shared encoder-processor-decoder architecture.
 
 Usage:
-    python experiment.py --epochs 50 --task sequential
-    python experiment.py --epochs 100 --task both --aggregation sum
+    python experiment.py --num-epochs 100
+    python experiment.py --num-epochs 500 --learning-rate 1e-5 --batch-size 10
 """
 
 import argparse
+import sys
 import os
-import pickle
-from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+
 import mlx.core as mx
+import mlx.optimizers as optim
 from tqdm import tqdm
-import numpy as np
 
-from model import task, nge, aggregation_fn
-from train import create_trainer
-from nge_utils import SimpleLogger, calculate_accuracy_metrics
+from model import NGE, AggregationFunction
+from train import train_epoch, evaluate_model
+from data_loading import load_dataset
+from nge_utils import count_parameters
+from utils.common import setup_reproducibility
 
 
-def print_experiment_header(**config):
-    """Print NGE experiment header with configuration."""
-    print(f"\n{'='*75}")
-    print(f"Neural Execution of Graph Algorithms (NGE) Experiment")
-    print(f"Learning to Execute: Prim's MST & Breadth-First Search")
-    print(f"{'='*75}")
+def print_experiment_header(config: dict):
+    """Print standardized experiment header."""
+    print(f"\n{'='*70}")
+    print("Neural Execution of Graph Algorithms (NGE)")
+    print("Learning: Bellman-Ford (Shortest Paths) & BFS (Reachability)")
+    print(f"{'='*70}")
     for key, value in config.items():
-        print(f"{key}: {value}")
-    print(f"{'='*75}")
-
-
-def debug_algorithm_execution(trainer, dataset, task_types):
-    """Debug algorithm execution by showing step-by-step execution on a validation graph."""
-    print(f"\n{'='*75}")
-    print(f"ALGORITHM EXECUTION DEBUG MODE")
-    print(f"{'='*75}")
-    
-    # Take first graph from validation set for debugging
-    debug_graph = dataset[0]
-    
-    for task_type in task_types:
-        task_name = "sequential" if task_type == task.SEQUENTIAL_ALGORITHM else "parallel"
-        algorithm_name = "Prim's MST" if task_type == task.SEQUENTIAL_ALGORITHM else "Breadth-First Search"
-        task_type_int = task_type.value if hasattr(task_type, 'value') else task_type
-        
-        print(f"\n{'-'*50}")
-        print(f"DEBUGGING: {algorithm_name} ({task_name.upper()})")
-        print(f"{'-'*50}")
-        
-        if task_type_int == 0:  # PARALLEL_ALGORITHM
-            execution_history = debug_graph['targets']['parallel']
-            state_key = 'bfs_state'
-            pred_key = 'bf_predecessor'
-            term_key = 'bf_termination'
-            distance_key = 'bf_distance'
-        else:  # SEQUENTIAL_ALGORITHM
-            execution_history = debug_graph['targets']['sequential']
-            state_key = 'prim_state'
-            pred_key = 'prim_predecessor'
-            term_key = 'prim_termination'
-            distance_key = None
-        
-        connection_matrix = debug_graph['connection_matrix']
-        num_nodes = connection_matrix.shape[0]
-        num_steps = len(execution_history[state_key]) - 1
-        
-        print(f"Graph Info: {num_nodes} nodes, {num_steps} algorithm steps")
-        
-        if num_steps == 0:
-            print("No execution steps to debug.")
-            continue
-        
-        # Step through algorithm execution
-        residual_features = mx.zeros([num_nodes])
-        
-        for step_idx in range(num_steps):  # Show all steps
-            print(f"\nStep {step_idx + 1}/{num_steps}:")
-            print(f"{'~'*30}")
-            
-            # Current state
-            current_state = execution_history[state_key][step_idx]
-            target_state = execution_history[state_key][step_idx + 1]
-            target_pred = execution_history[pred_key][step_idx + 1]
-            target_term = execution_history[term_key][step_idx + 1]
-            
-            # Safe conversion functions
-            def safe_argmax(arr):
-                try:
-                    np_arr = np.array(arr)
-                    if np_arr.ndim == 1:
-                        return np_arr
-                    elif np_arr.ndim == 2:
-                        return np.argmax(np_arr, axis=1)
-                    else:
-                        return np_arr.flatten()
-                except:
-                    return str(arr)[:50] + "..."
-            
-            def safe_scalar(val):
-                """Safely convert to scalar."""
-                try:
-                    if hasattr(val, 'item'):
-                        # Try to convert MLX array to scalar
-                        val_np = np.array(val)
-                        if val_np.size == 1:
-                            return float(val_np.item())
-                        else:
-                            return float(val_np.flatten()[0])
-                    elif isinstance(val, (list, np.ndarray)):
-                        val_arr = np.array(val)
-                        if val_arr.size == 1:
-                            return float(val_arr.item())
-                        else:
-                            return float(val_arr.flatten()[0])
-                    else:
-                        return float(val)
-                except Exception:
-                    # Fallback: just return 0.0 if conversion fails
-                    return 0.0
-            
-            current_state_disp = safe_argmax(current_state)
-            target_state_disp = safe_argmax(target_state)
-            target_pred_disp = safe_argmax(target_pred)
-            target_term_val = safe_scalar(target_term[1])
-            
-            print(f"Current State: {current_state_disp}")
-            print(f"Target State:  {target_state_disp}")
-            print(f"Target Pred:   {target_pred_disp}")
-            print(f"Target Term:   {target_term_val:.3f}")
-            
-            # Model prediction
-            try:
-                current_features = mx.argmax(current_state, axis=1) if len(current_state.shape) > 1 else current_state
-                # Ensure residual_features matches the length of current_features
-                if len(current_features) != len(residual_features):
-                    residual_features = mx.zeros(len(current_features))
-                input_features = mx.stack([current_features, residual_features], axis=1)
-                input_data = (input_features, connection_matrix)
-                
-                if distance_key:
-                    target_distance = execution_history[distance_key][step_idx + 1]
-                    graph_targets = (target_state, target_distance, target_pred)
-                    target_distance_disp = safe_argmax(target_distance)
-                    print(f"Target Dist:   {target_distance_disp}")
-                else:
-                    graph_targets = (target_state, target_pred)
-                
-                # Get model predictions
-                loss, losses, output, termination_prob = trainer.eval_step(
-                    input_data, graph_targets, target_term, task_type_int, logger=None
-                )
-                
-                # Show predictions
-                if task_type_int == 0:  # PARALLEL_ALGORITHM
-                    pred_state, pred_distance, pred_pred = output
-                    pred_state_disp = safe_argmax(pred_state)
-                    pred_distance_disp = np.array(pred_distance).flatten()
-                    pred_pred_disp = safe_argmax(pred_pred)
-                    print(f"Pred State:    {pred_state_disp}")
-                    print(f"Pred Dist:     {pred_distance_disp}")
-                    print(f"Pred Pred:     {pred_pred_disp}")
-                else:  # SEQUENTIAL_ALGORITHM
-                    pred_state, pred_pred = output
-                    pred_state_disp = safe_argmax(pred_state)
-                    pred_pred_disp = safe_argmax(pred_pred)
-                    print(f"Pred State:    {pred_state_disp}")
-                    print(f"Pred Pred:     {pred_pred_disp}")
-                
-                print(f"Pred Term:     {safe_scalar(mx.softmax(termination_prob)[1]):.3f}")
-                print(f"Step Loss:     {safe_scalar(loss):.4f}")
-                
-                # Calculate step accuracy
-                if task_type_int == 0:
-                    metrics = calculate_accuracy_metrics(
-                        pred_state, pred_pred, target_state, target_pred,
-                        termination_prob, target_term, pred_distance, target_distance
-                    )
-                else:
-                    metrics = calculate_accuracy_metrics(
-                        pred_state, pred_pred, target_state, target_pred,
-                        termination_prob, target_term
-                    )
-                
-                print(f"Step Accuracy: state={metrics['state_acc']:.3f}, pred={metrics['pred_acc']:.3f}, term={metrics['term_acc']:.3f}")
-                if 'dist_acc' in metrics:
-                    print(f"               dist={metrics['dist_acc']:.3f}")
-                    
-            except Exception as e:
-                print(f"Error in model prediction: {e}")
-                print("Skipping this step...")
-                continue
+        print(f"  {key}: {value}")
+    print(f"{'='*70}\n")
 
 
 def run_experiment(args):
-    """Run NGE training experiment with algorithm execution analysis."""
+    """Run NGE training experiment."""
+    setup_reproducibility()
     
-    # Map task and aggregation
-    task_map = {
-        'sequential': task.SEQUENTIAL_ALGORITHM,
-        'parallel': task.PARALLEL_ALGORITHM,
-        'both': 'both'
-    }
-    
+    # Map aggregation function
     agg_map = {
-        'sum': aggregation_fn.SUM,
-        'avg': aggregation_fn.AVG,
-        'max': aggregation_fn.MAX,
-        'min': aggregation_fn.MIN
+        'sum': AggregationFunction.SUM,
+        'avg': AggregationFunction.AVG,
+        'max': AggregationFunction.MAX,
+        'min': AggregationFunction.MIN
     }
+    aggregation_fn = agg_map[args.aggregation]
     
-    task_type = task_map[args.task]
-    aggregation_enum = agg_map[args.aggregation]
-    
-    # Setup task types
-    if task_type == 'both':
-        task_types = [task.SEQUENTIAL_ALGORITHM, task.PARALLEL_ALGORITHM]
-        task_names = ['sequential (Prim\'s MST)', 'parallel (BFS)']
-        algorithms = ['Prim\'s Minimum Spanning Tree', 'Breadth-First Search']
-    else:
-        task_types = [task_type]
-        if task_type == task.SEQUENTIAL_ALGORITHM:
-            task_names = ['sequential (Prim\'s MST)']
-            algorithms = ['Prim\'s Minimum Spanning Tree']
-        else:
-            task_names = ['parallel (BFS)']
-            algorithms = ['Breadth-First Search']
-    
-    # Configuration
+    # Model configuration
     model_config = {
-        'embedding_dim': args.embedding_dim,
-        'dropout_prob': args.dropout,
-        'skip_connections': args.skip_connections,
-        'aggregation_fn': aggregation_enum,
-        'num_mp_layers': args.mp_layers
+        'embedding_dim': args.hidden_dim,
+        'residual_connections': args.residual_connections,
+        'aggregation_fn': aggregation_fn,
+        'num_mp_layers': args.num_layers,
+        'dropout': args.dropout,
+        'num_predecessor_layers': args.num_predecessor_layers,
+        'num_update_layers': args.num_update_layers
     }
     
+    # Experiment configuration for display
     experiment_config = {
-        'learning_rate': args.learning_rate,
-        'epochs': args.epochs,
-        'early_stopping_patience': args.patience,
-        'dataset': 'NEGA Custom (Graph Algorithm Execution)',
-        'algorithms': ', '.join(algorithms),
-        'architecture': f"{args.mp_layers} MP layers, {args.embedding_dim}d embedding",
-        'aggregation': f"{args.aggregation.upper()} aggregation function",
-        'regularization': f"dropout={args.dropout}, skip_conn={args.skip_connections}"
+        'Dataset': 'Generated Graphs (BF + BFS execution traces)',
+        'Algorithms': 'Bellman-Ford, BFS',
+        'Architecture': f"{args.num_layers} MP layers, {args.hidden_dim}d embedding",
+        'Aggregation': f"{args.aggregation.upper()} function",
+        'Training Epochs': args.num_epochs,
+        'Learning Rate': f"{args.start_lr} -> {args.end_lr}",
+        'Batch Size': args.batch_size,
+        'Max Grad Norm': args.max_grad_norm,
+        'BF Predecessor Weight': args.bf_pred_alpha,
+        'Regularization': f"dropout={args.dropout}, residual={args.residual_connections}"
     }
     
-    print_experiment_header(**experiment_config)
+    print_experiment_header(experiment_config)
     
-    # Create trainer
-    trainer = create_trainer(model_config, learning_rate=args.learning_rate)
+    # Load datasets
+    print("Loading datasets...")
+    train_dataset = load_dataset(os.path.join(args.data, 'train_dataset.npz'))
+    val_dataset = load_dataset(os.path.join(args.data, 'val_dataset.npz'))
+    test_dataset = load_dataset(os.path.join(args.data, 'test_dataset.npz'))
     
-    print(f"Model initialized for graph algorithm execution")
+    print(f"  Training graphs: {len(train_dataset):,}")
+    print(f"  Validation graphs: {len(val_dataset):,}")
+    print(f"  Test graphs: {len(test_dataset):,}")
     
-    # Load datasets - including test set
-    datasets = {}
-    data_files = ['train_graphs.pkl', 'val_graphs.pkl', 'test_graphs.pkl']
-    for data_file in data_files:
-        dataset_path = f'../../utils/datasets/nega_custom/data/{data_file}'
-        if os.path.exists(dataset_path):
-            with open(dataset_path, 'rb') as f:
-                key = data_file.replace('_graphs.pkl', '')
-                datasets[key] = pickle.load(f)
-        else:
-            if data_file != 'test_graphs.pkl':  # Test set might not exist
-                print(f"Warning: {dataset_path} not found")
+    # Initialize model
+    print("\nInitializing model...")
+    model = NGE(**model_config)
+    model.train()
     
-    if 'train' not in datasets or 'val' not in datasets:
-        print("Error: Required datasets not found. Please ensure NEGA custom data is available.")
-        return None
+    param_count = count_parameters(model)
+    print(f"Model parameters: {param_count:,}")
     
-    print(f"\nDataset Statistics:")
-    print(f"  Training graphs: {len(datasets['train']):,}")
-    print(f"  Validation graphs: {len(datasets['val']):,}")
-    if 'test' in datasets:
-        print(f"  Test graphs: {len(datasets['test']):,}")
-    print(f"  Algorithms to learn: {', '.join(algorithms)}")
+    # Set up learning rate schedule
+    total_steps = args.num_epochs * (len(train_dataset) / args.batch_size)
+    decay_steps = int(total_steps * args.decay_ratio)
     
-    # Training tracking with deltas
+    lr_schedule = optim.cosine_decay(
+        init=args.start_lr,
+        decay_steps=decay_steps,
+        end=args.end_lr
+    )
+    
+    optimizer = optim.Adam(learning_rate=lr_schedule)
+    
+    # Training tracking
     best_val_loss = float('inf')
     best_epoch = 0
     patience_counter = 0
     train_history = []
     val_history = []
     
-    # Previous values for delta calculation
-    prev_train_loss = None
-    prev_val_loss = None
+    print(f"\nStarting training for {args.num_epochs} epochs...")
     
-    print(f"\nStarting training for {args.epochs} epochs...")
-    print(f"Tasks: {', '.join(task_names)}")
+    # Training loop
+    pbar = tqdm(range(args.num_epochs), desc="Training NGE", unit="epoch")
     
-    # Create custom progress tracking
-    epoch_pbar = tqdm(range(args.epochs), desc="Training NGE", unit="epoch",
-                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}',
-                      position=0, leave=True)
-    
-    for epoch in range(args.epochs):
+    for epoch in pbar:
         # Training phase
-        train_losses = []
+        avg_train_loss, avg_aux_losses, avg_per_head_grads = train_epoch(
+            model=model,
+            optimizer=optimizer,
+            dataset=train_dataset,
+            embedding_dim=args.hidden_dim,
+            batch_size=args.batch_size,
+            max_grad_norm=args.max_grad_norm,
+            bf_pred_alpha=args.bf_pred_alpha,
+            label_smoothing=args.label_smoothing
+        )
         
-        for task_idx, current_task in enumerate(task_types):
-            # Train on this task
-            train_loss = trainer.train_model(datasets['train'], current_task, logger=None, phase="train")
-            train_losses.append(train_loss)
+        train_history.append(float(avg_train_loss))
         
-        avg_train_loss = sum(train_losses) / len(train_losses)
-        
-        # Validation phase
-        val_losses = []
-        
-        for task_idx, current_task in enumerate(task_types):
-            # Validate on this task
-            val_loss = trainer.train_model(datasets['val'], current_task, logger=None, phase="val")
-            val_losses.append(val_loss)
-        
-        avg_val_loss = sum(val_losses) / len(val_losses)
-        
-        # Calculate deltas
-        train_delta = 0.0 if prev_train_loss is None else avg_train_loss - prev_train_loss
-        val_delta = 0.0 if prev_val_loss is None else avg_val_loss - prev_val_loss
-        
-        # Store history
-        train_history.append(avg_train_loss)
-        val_history.append(avg_val_loss)
-        
-        # Early stopping check
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            best_epoch = epoch
-            patience_counter = 0
-        else:
-            patience_counter += 1
-        
-        # Update progress bar description with current epoch info
-        desc = f"Epoch {epoch + 1}/{args.epochs} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | Best: {best_val_loss:.4f} (ep {best_epoch + 1})"
-        epoch_pbar.set_description(desc)
-        
-        # Update progress with additional details in postfix
-        postfix_dict = {
-            'patience': f"{patience_counter}/{args.patience}"
-        }
-        
-        if prev_train_loss is not None:
-            postfix_dict['Δtrain'] = f"{train_delta:+.4f}"
-            postfix_dict['Δval'] = f"{val_delta:+.4f}"
-        
-        epoch_pbar.set_postfix(postfix_dict)
-        
-        if patience_counter >= args.patience:
-            epoch_pbar.set_description("Early stopping triggered")
-            epoch_pbar.write(f"Early stopping triggered at epoch {epoch + 1}")
-            break
-        
-        # Update previous values
-        prev_train_loss = avg_train_loss
-        prev_val_loss = avg_val_loss
-        
-        epoch_pbar.update(1)
-    
-    epoch_pbar.close()
-    
-    # Final evaluation on all datasets
-    print(f"\n{'='*75}")
-    print(f"NGE Training Completed!")
-    print(f"{'='*75}")
-    print(f"Training Results:")
-    print(f"  Best Validation Loss: {best_val_loss:.4f} (epoch {best_epoch + 1})")
-    print(f"  Total Epochs: {epoch + 1}")
-    print(f"  Final Training Loss: {train_history[-1]:.4f}")
-    print(f"  Final Validation Loss: {val_history[-1]:.4f}")
-    
-    # Test on all available datasets
-    print(f"\nFinal Evaluation on All Datasets:")
-    for dataset_name, dataset in datasets.items():
-        if dataset_name == 'train':
-            continue  # Skip training set for final eval
+        # Validation phase (every 10 epochs)
+        if (epoch + 1) % 10 == 0 or epoch == args.num_epochs - 1:
+            val_aux_losses, val_loss, val_accuracies = evaluate_model(
+                model, val_dataset, args.hidden_dim
+            )
             
-        print(f"\n{dataset_name.capitalize()} Set Evaluation:")
-        for task_idx, current_task in enumerate(task_types):
-            task_name = "Sequential (Prim's MST)" if current_task == task.SEQUENTIAL_ALGORITHM else "Parallel (BFS)"
-            test_loss = trainer.train_model(dataset, current_task, logger=None, phase="val")
-            print(f"  {task_name}: Loss = {test_loss:.4f}")
+            val_history.append(float(val_loss))
+            
+            # Early stopping check
+            if float(val_loss) < best_val_loss:
+                best_val_loss = float(val_loss)
+                best_epoch = epoch
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            
+            pbar.set_postfix({
+                'train': f"{float(avg_train_loss):.4f}",
+                'val': f"{float(val_loss):.4f}",
+                'best': f"{best_val_loss:.4f}",
+                'bf_dist_acc': f"{float(val_accuracies[0]):.3f}",
+                'bfs_acc': f"{float(val_accuracies[2]):.3f}"
+            })
+            
+            if patience_counter >= args.patience:
+                print(f"\nEarly stopping at epoch {epoch + 1}")
+                break
+        else:
+            pbar.set_postfix({
+                'train': f"{float(avg_train_loss):.4f}",
+                'lr': f"{float(optimizer.learning_rate):.2e}"
+            })
     
-    # Algorithm execution debug mode
-    if args.analyze_execution:
-        debug_algorithm_execution(trainer, datasets['val'], task_types)
+    # Final evaluation
+    print(f"\n{'='*70}")
+    print("Training Complete")
+    print(f"{'='*70}")
+    print(f"  Best Validation Loss: {best_val_loss:.4f} (epoch {best_epoch + 1})")
+    print(f"  Final Training Loss: {train_history[-1]:.4f}")
+    
+    # Test set evaluation
+    print("\nTest Set Evaluation:")
+    test_aux_losses, test_loss, test_accuracies = evaluate_model(
+        model, test_dataset, args.hidden_dim
+    )
+    
+    print(f"  Test Loss: {float(test_loss):.4f}")
+    print(f"  Accuracies:")
+    print(f"    BF Distance: {float(test_accuracies[0]):.3f}")
+    print(f"    BF Predecessor: {float(test_accuracies[1]):.3f}")
+    print(f"    BFS State: {float(test_accuracies[2]):.3f}")
+    print(f"    BF Termination: {float(test_accuracies[3]):.3f}")
+    print(f"    BFS Termination: {float(test_accuracies[4]):.3f}")
+    
+    print(f"{'='*70}\n")
     
     return {
         'best_val_loss': best_val_loss,
         'best_epoch': best_epoch,
         'final_train_loss': train_history[-1],
-        'final_val_loss': val_history[-1],
-        'train_history': train_history,
-        'val_history': val_history,
-        'task_types': [t.name if hasattr(t, 'name') else str(t) for t in task_types],
-        'model_config': model_config
+        'test_loss': float(test_loss),
+        'test_accuracies': {
+            'bf_distance': float(test_accuracies[0]),
+            'bf_predecessor': float(test_accuracies[1]),
+            'bfs_state': float(test_accuracies[2]),
+            'bf_termination': float(test_accuracies[3]),
+            'bfs_termination': float(test_accuracies[4])
+        }
     }
 
 
@@ -407,71 +213,60 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Single algorithm training
-  python experiment.py --task sequential --epochs 100
-  python experiment.py --task parallel --epochs 100
-  
-  # Multi-task learning
-  python experiment.py --task both --epochs 150
-  
-  # Architecture exploration
-  python experiment.py --mp-layers 3 --embedding-dim 64
-  
-  # Debug algorithm execution step-by-step
-  python experiment.py --task both --epochs 50 --analyze-execution
-  
-NGE Architecture Details:
-  - Neural execution of classical graph algorithms
-  - Multi-task learning: Prim's MST + Breadth-First Search
-  - Message passing with multiple aggregation functions
-  - Step-by-step algorithm execution learning
-  
-Algorithms:
-  - Sequential: Prim's Minimum Spanning Tree algorithm
-  - Parallel: Breadth-First Search algorithm
-  - Multi-task: Learn both algorithms simultaneously
-  
-Debug Mode (--analyze-execution):
-  - Shows step-by-step algorithm execution on validation graph
-  - Displays intermediate states, predictions, and targets
-  - Useful for understanding model behavior and debugging
+  python experiment.py --num-epochs 100
+  python experiment.py --num-epochs 500 --batch-size 10 --start-lr 1e-5
+  python experiment.py --num-layers 3 --hidden-dim 64
         """
     )
     
     # Training parameters
-    parser.add_argument('--epochs', type=int, default=50,
-                        help='Number of training epochs (default: 50)')
-    parser.add_argument('--learning-rate', type=float, default=0.001,
-                        help='Learning rate (default: 0.001)')
-    parser.add_argument('--patience', type=int, default=10,
-                        help='Early stopping patience (default: 10)')
+    parser.add_argument('--num-epochs', type=int, default=500,
+                        help='Number of training epochs (default: 500)')
+    parser.add_argument('--start-lr', type=float, default=1e-5,
+                        help='Starting learning rate (default: 1e-5)')
+    parser.add_argument('--end-lr', type=float, default=1e-5,
+                        help='Ending learning rate (default: 1e-5)')
+    parser.add_argument('--decay-ratio', type=float, default=0.005,
+                        help='LR decay ratio (default: 0.005)')
+    parser.add_argument('--batch-size', type=int, default=10,
+                        help='Gradient accumulation batch size (default: 10)')
+    parser.add_argument('--max-grad-norm', type=float, default=1.0,
+                        help='Maximum gradient norm (default: 1.0)')
+    parser.add_argument('--patience', type=int, default=50,
+                        help='Early stopping patience in validation cycles (default: 50)')
     
-    # NGE-specific parameters
-    parser.add_argument('--task', choices=['sequential', 'parallel', 'both'], default='sequential',
-                        help='Algorithm task type (default: sequential)')
+    # Loss parameters
+    parser.add_argument('--bf-pred-alpha', type=float, default=1.0,
+                        help='Weight for BF predecessor loss (default: 1.0)')
+    parser.add_argument('--label-smoothing', type=float, default=0.0,
+                        help='Label smoothing for cross-entropy (default: 0.0)')
+    
+    # Architecture parameters
     parser.add_argument('--aggregation', choices=['sum', 'avg', 'max', 'min'], default='max',
-                        help='Message passing aggregation function (default: max)')
-    parser.add_argument('--mp-layers', type=int, default=2,
+                        help='Aggregation function (default: max)')
+    parser.add_argument('--num-layers', type=int, default=2,
                         help='Number of message passing layers (default: 2)')
-    parser.add_argument('--embedding-dim', type=int, default=32,
+    parser.add_argument('--hidden-dim', type=int, default=32,
                         help='Node embedding dimension (default: 32)')
-    parser.add_argument('--dropout', type=float, default=0.5,
-                        help='Dropout probability (default: 0.5)')
-    parser.add_argument('--skip-connections', action='store_true', default=True,
-                        help='Use skip connections (default: True)')
-    parser.add_argument('--no-skip-connections', action='store_false', dest='skip_connections',
-                        help='Disable skip connections')
+    parser.add_argument('--dropout', type=float, default=0.1,
+                        help='Dropout probability (default: 0.1)')
+    parser.add_argument('--residual-connections', action='store_true', default=True,
+                        help='Use residual connections (default: True)')
+    parser.add_argument('--no-residual-connections', action='store_false', dest='residual_connections',
+                        help='Disable residual connections')
+    parser.add_argument('--num-predecessor-layers', type=int, default=5,
+                        help='Number of predecessor prediction layers (default: 5)')
+    parser.add_argument('--num-update-layers', type=int, default=1,
+                        help='Number of update layers per MP layer (default: 1)')
     
-    # Analysis options
-    parser.add_argument('--analyze-execution', action='store_true',
-                        help='Debug mode: show step-by-step algorithm execution on validation graph')
+    # Data parameters
+    parser.add_argument('--data', type=str, default='data',
+                        help='Path to dataset directory')
     
     args = parser.parse_args()
     
     try:
-        results = run_experiment(args)
-        if results is None:
-            return 1
+        run_experiment(args)
         return 0
     except Exception as e:
         print(f"Experiment failed: {e}")
@@ -481,4 +276,4 @@ Debug Mode (--analyze-execution):
 
 
 if __name__ == "__main__":
-    exit(main()) 
+    exit(main())

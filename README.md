@@ -35,6 +35,7 @@ Implementation-wise, the only notable deviation from what might be called a “s
 ### Graph Attention Networks & MPNN
 Naively, I never put much thought into learning PyTorch (same goes for MLX). That is, I treated it simply as a sort of translation process—one where semantics were crucial and syntax merely an afterthought. This proved to be a costly mistake. Many hours and many burned laps were needed in order to make me realize that I couldn’t simply loop my way through life and expect that blindness to vectorization, parallelization, etc., wouldn’t eventually come back to bite. Now, although I must admit it is not the most pleasant of activities, there is something satisfying in finally nailing the tensor acrobatics needed to make the models run efficiently. More precisely, I now see some beauty in neighborhood-aggregated softmax, in a way I was blind to months before. Here I must say Aleksa Gordić’s [notebooks](https://github.com/gordicaleksa/pytorch-GAT?tab=readme-ov-file) were invaluable.
 
-
+### Neural Execution of Graph Algorithms
+First incursion into *true* algo. reasoning. Given the more obscure nature of this archiecture, I had a hard time translating the model's description to its actual implementation. Perhpas it was a lack of context by my part which leading me to expeirment my way through archutcetural details which to more expericned practioners could have easly infered. It does suggest, however, a need for more first principles type knwoldegd. In a snese, I felt all the errors I made could have easly been deduced from 
 
   

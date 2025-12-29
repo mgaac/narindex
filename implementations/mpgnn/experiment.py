@@ -1,36 +1,60 @@
 #!/usr/bin/env python3
 """
-Message Passing Graph Neural Networks (MPGNN) Experiment Runner
+Message Passing Neural Networks (MPNN) Experiment Runner
+
+Paper: "Neural Message Passing for Quantum Chemistry" (Gilmer et al., 2017)
+       arXiv:1704.01212v2
 
 Usage:
-    python experiment.py --total-steps 2000 --aggregation sum
-    python experiment.py --total-steps 1000 --eval-interval 25 --mp-layers 3
+    python experiment.py --num-steps 2000 --aggregation sum
+    python experiment.py --num-steps 1000 --eval-interval 25 --num-layers 3
 """
 
 import argparse
-import os
 import sys
-from pathlib import Path
+import os
 
-# Add utils directory to path for data_loading import
-sys.path.append('../../utils/datasets/CORA/scripts')
-from data_loading import load_data
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+
+import mlx.core as mx
+import mlx.optimizers as optim
+from tqdm import tqdm
 
 from model import MPNN, AggregationFunction
+from utils.common import (
+    cross_entropy_loss_fn, accuracy_fn, print_model_summary, 
+    setup_reproducibility, TrainingLoop
+)
+from utils.datasets.CORA.cora import load_cora_data, get_cora_config
 
 
-def print_experiment_header(**config):
-    """Print MPGNN experiment header with configuration."""
+def print_experiment_header(config: dict):
+    """Print standardized experiment header."""
     print(f"\n{'='*70}")
-    print(f"Message Passing Graph Neural Networks (MPGNN) Experiment")
+    print("Message Passing Neural Networks (MPNN)")
+    print("Paper: arXiv:1704.01212v2")
     print(f"{'='*70}")
     for key, value in config.items():
-        print(f"{key}: {value}")
-    print(f"{'='*70}")
+        print(f"  {key}: {value}")
+    print(f"{'='*70}\n")
+
+
+def count_parameters(model) -> int:
+    """Count total model parameters."""
+    def _count(params):
+        total = 0
+        if isinstance(params, dict):
+            for v in params.values():
+                total += _count(v)
+        elif hasattr(params, 'size'):
+            total += params.size
+        return total
+    return _count(model.parameters())
 
 
 def run_experiment(args):
-    """Run MPGNN training experiment."""
+    """Run MPNN training experiment."""
+    setup_reproducibility()
     
     # Map aggregation string to enum
     agg_map = {
@@ -39,135 +63,96 @@ def run_experiment(args):
         'max': AggregationFunction.MAX,
         'min': AggregationFunction.MIN
     }
-    aggregation_enum = agg_map[args.aggregation]
+    aggregation_fn = agg_map[args.aggregation]
     
-    # Configuration
+    # Load dataset
+    print("Loading CORA dataset...")
+    cora_config = get_cora_config()
+    node_embeddings, connection_matrix, labels, train_mask, test_mask = load_cora_data(args.data)
+    
+    # Model configuration
     model_config = {
-        'num_nodes': 2708,
-        'embedding_dim': 1433,
+        'num_nodes': cora_config['num_nodes'],
+        'embedding_dim': cora_config['num_features'],
         'dim_proj': args.hidden_dim,
         'dropout_prob': args.dropout,
         'skip_connections': args.skip_connections,
-        'aggregation_fn': aggregation_enum,
-        'num_mp_layers': args.mp_layers,
+        'aggregation_fn': aggregation_fn,
+        'num_mp_layers': args.num_layers,
         'num_out_layers': 1,
-        'num_classes': 7
+        'num_classes': cora_config['num_classes']
     }
     
-    training_config = {
-        'total_steps': args.total_steps,
-        'learning_rate': args.learning_rate,
-        'eval_interval': args.eval_interval,
-        'patience': args.patience,
-        'aggregation': args.aggregation,
-        'mp_layers': args.mp_layers
-    }
-    
+    # Experiment configuration for display
     experiment_config = {
-        'total_steps': args.total_steps,
-        'learning_rate': args.learning_rate,
-        'eval_interval': args.eval_interval,
-        'dataset': 'CORA (Citation Network)',
-        'architecture': f"{args.mp_layers} MP layers, {args.hidden_dim}d hidden",
-        'aggregation': f"{args.aggregation.upper()} aggregation function",
-        'regularization': f"dropout={args.dropout}, skip_conn={args.skip_connections}"
+        'Dataset': 'CORA (Citation Network)',
+        'Architecture': f"{args.num_layers} MP layers, {args.hidden_dim}d hidden",
+        'Aggregation': f"{args.aggregation.upper()} function",
+        'Training Steps': args.num_steps,
+        'Learning Rate': args.learning_rate,
+        'Eval Interval': args.eval_interval,
+        'Regularization': f"dropout={args.dropout}, skip_conn={args.skip_connections}"
     }
     
-    print_experiment_header(**experiment_config)
+    print_experiment_header(experiment_config)
     
-    # Import and call training function
-    from train import train_mpgnn
+    # Initialize model
+    print("Initializing model...")
+    model = MPNN(**model_config)
+    mx.eval(model.parameters())
     
-    # Count parameters
-    import mlx.core as mx
+    param_count = count_parameters(model)
+    print(f"Model parameters: {param_count:,}")
     
-    temp_model = MPNN(**model_config)
-    mx.eval(temp_model.parameters())
+    # Initialize optimizer
+    optimizer = optim.Adam(learning_rate=args.learning_rate)
     
-    def count_parameters(params):
-        total = 0
-        if isinstance(params, dict):
-            for v in params.values():
-                if hasattr(v, 'size'):
-                    total += v.size
-                elif isinstance(v, dict):
-                    total += count_parameters(v)
-        return total
+    # Prepare data
+    data = (node_embeddings, connection_matrix)
+    train_data = (data, labels, train_mask)
+    test_data = (data, labels, test_mask)
     
-    param_count = count_parameters(temp_model.parameters())
-    print(f"Model initialized with {param_count:,} parameters")
+    # Training loop
+    trainer = TrainingLoop(model, optimizer, cross_entropy_loss_fn, accuracy_fn)
     
-    # Display dataset statistics and train
-    data_path = "../../utils/datasets/CORA/data"
-    results = train_mpgnn(model_config, training_config, data_path)
+    print(f"\nStarting training for {args.num_steps} steps...")
+    results = trainer.train(train_data, test_data, args.num_steps, args.eval_interval)
     
-    # Print dataset statistics
-    stats = results['dataset_stats']
-    print(f"\nDataset Statistics:")
-    print(f"  Nodes: {stats['nodes']:,}")
-    print(f"  Features per node: {stats['features']:,}")
-    print(f"  Training nodes: {stats['train_nodes']:,}")
-    print(f"  Validation nodes: {stats['val_nodes']:,}")
-    print(f"  Test nodes: {stats['test_nodes']:,}")
-    
-    # Print final results
+    # Print results
     print(f"\n{'='*70}")
-    print(f"MPGNN Training Completed!")
+    print("Training Complete")
     print(f"{'='*70}")
-    print(f"Final Results:")
-    print(f"  Test Accuracy: {results['test_accuracy']:.4f}")
-    print(f"  Test Loss: {results['test_loss']:.4f}")
-    print(f"  Best Validation Loss: {results['best_val_loss']:.4f} (step {results['best_step']})")
-    print(f"  Total Steps: {results['total_steps']}")
-    print(f"  Evaluation Interval: {results['eval_interval']}")
-    print(f"  Aggregation Function: {results['aggregation_function'].upper()}")
+    print(f"  Final Loss: {results['final_loss']:.4f}")
+    print(f"  Final Accuracy: {results['final_accuracy']:.4f}")
+    print(f"{'='*70}\n")
     
     return results
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Message Passing Graph Neural Networks (MPGNN) Experiment Runner",
+        description="Message Passing Neural Networks (MPNN) Experiment Runner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Different aggregation functions
-  python experiment.py --aggregation sum --total-steps 2000
-  python experiment.py --aggregation avg --total-steps 2000
-  python experiment.py --aggregation max --total-steps 2000
-  
-  # Architecture exploration
-  python experiment.py --mp-layers 3 --hidden-dim 16
-  
-  # Training configuration
-  python experiment.py --total-steps 1000 --eval-interval 25 --patience 5
-  
-  # Regularization study
+  python experiment.py --aggregation sum --num-steps 2000
+  python experiment.py --aggregation max --num-layers 3 --hidden-dim 16
   python experiment.py --dropout 0.3 --no-skip-connections
-  
-MPGNN Architecture:
-  - Message passing framework for node representation learning
-  - Multiple aggregation functions (SUM, AVG, MAX, MIN)
-  - Skip connections for better gradient flow
-  - Configurable number of message passing layers
-  - Step-based training with validation-based early stopping
         """
     )
     
     # Training parameters
-    parser.add_argument('--total-steps', type=int, default=2000,
-                        help='Total number of training steps (default: 2000)')
+    parser.add_argument('--num-steps', type=int, default=2000,
+                        help='Number of training steps (default: 2000)')
     parser.add_argument('--learning-rate', type=float, default=0.001,
                         help='Learning rate (default: 0.001)')
-    parser.add_argument('--patience', type=int, default=10,
-                        help='Early stopping patience in evaluation intervals (default: 10)')
     parser.add_argument('--eval-interval', type=int, default=50,
-                        help='Number of steps between evaluations (default: 50)')
+                        help='Evaluation interval in steps (default: 50)')
     
-    # MPGNN-specific architecture
+    # Architecture parameters
     parser.add_argument('--aggregation', choices=['sum', 'avg', 'max', 'min'], default='max',
-                        help='Aggregation function for message passing (default: max)')
-    parser.add_argument('--mp-layers', type=int, default=1,
+                        help='Aggregation function (default: max)')
+    parser.add_argument('--num-layers', type=int, default=1,
                         help='Number of message passing layers (default: 1)')
     parser.add_argument('--hidden-dim', type=int, default=8,
                         help='Hidden dimension (default: 8)')
@@ -178,10 +163,14 @@ MPGNN Architecture:
     parser.add_argument('--no-skip-connections', action='store_false', dest='skip_connections',
                         help='Disable skip connections')
     
+    # Data parameters
+    parser.add_argument('--data', type=str, default='../../utils/datasets/CORA/data',
+                        help='Path to CORA dataset')
+    
     args = parser.parse_args()
     
     try:
-        results = run_experiment(args)
+        run_experiment(args)
         return 0
     except Exception as e:
         print(f"Experiment failed: {e}")
@@ -191,4 +180,4 @@ MPGNN Architecture:
 
 
 if __name__ == "__main__":
-    exit(main()) 
+    exit(main())

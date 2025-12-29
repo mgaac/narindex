@@ -1,328 +1,277 @@
-import mlx.nn as nn
+"""Neural Execution of Graph Algorithms (NGE) Training Module
+
+Provides the training loop and loss computation for the NGE model
+on Bellman-Ford and BFS algorithm execution tasks.
+"""
+
 import mlx.core as mx
+import mlx.nn as nn
+import mlx.utils as utils
 import mlx.optimizers as optim
-from functools import partial
 
-from model import task, nge, PARALLEL_ALGORITHM, SEQUENTIAL_ALGORITHM
-from nge_utils import calculate_accuracy_metrics, SimpleLogger
+from model import NGE, AggregationFunction
+from nge_utils import extract_per_head_magnitude_grads, calculate_losses_and_accuracies
 
 
-class NGETrainer:    
-    def __init__(self, model, optimizer):
-        self.model = model
-        self.optimizer = optimizer
-
-        self.state = [model.state, optimizer.state, mx.random.state]
-        
-        # Create gradient functions
-        self.sequential_loss_and_grad_fn = nn.value_and_grad(model, self._sequential_loss_fn)
-        self.parallel_loss_and_grad_fn = nn.value_and_grad(model, self._parallel_loss_fn)
-        
-        # Compile separate functions for each task type to avoid conditional logic in compiled functions
-        self.compiled_sequential_train_step = mx.compile(self._sequential_train_step_impl, inputs=self.state, outputs=self.state)
-        self.compiled_parallel_train_step = mx.compile(self._parallel_train_step_impl, inputs=self.state, outputs=self.state)
-        self.compiled_sequential_eval_step = mx.compile(self._sequential_eval_step_impl, inputs=self.state, outputs=self.state)
-        self.compiled_parallel_eval_step = mx.compile(self._parallel_eval_step_impl, inputs=self.state, outputs=self.state)
+def graph_execution_loss_fn(model, graph_data, embedding_dim: int, bf_pred_alpha: float = 1.0, label_smoothing: float = 0.0):
+    """Compute loss for a single graph across all algorithm execution steps.
     
-    def _sequential_loss_fn(self, model, input_data, graph_targets, termination_target):
-        """Loss function for sequential algorithms (Prim's MST)"""
-        output, termination_prob = model(input_data, SEQUENTIAL_ALGORITHM)
-        state, predesecor = output
-        reachability_target, predesecor_target = graph_targets
-
-        state_loss = nn.losses.binary_cross_entropy(state, reachability_target, reduction='mean')
-        pred_loss = nn.losses.cross_entropy(predesecor, predesecor_target, reduction='mean')
-        termination_loss = nn.losses.binary_cross_entropy(termination_prob, termination_target, reduction='mean')
-        total_loss = state_loss + pred_loss + termination_loss
-
-        return total_loss, (state_loss, pred_loss, termination_loss), output, termination_prob
-
-    def _parallel_loss_fn(self, model, input_data, graph_targets, termination_target):
-        """Loss function for parallel algorithms (BFS)"""
-        output, termination_prob = model(input_data, PARALLEL_ALGORITHM)
-        state, distance, predesecor = output
-        reachability_target, distance_target, predesecor_target = graph_targets
-
-        state_loss = nn.losses.binary_cross_entropy(state, reachability_target, reduction='mean')
-        distance_loss = nn.losses.mse_loss(distance.squeeze(), distance_target, reduction='mean')
-        pred_loss = nn.losses.cross_entropy(predesecor, predesecor_target, reduction='mean')
-        termination_loss = nn.losses.binary_cross_entropy(termination_prob, termination_target, reduction='mean')
-        total_loss = state_loss + distance_loss + pred_loss + termination_loss
-
-        return total_loss, (state_loss, distance_loss, pred_loss, termination_loss), output, termination_prob
-
-    def _sequential_train_step_impl(self, input_data, graph_targets, termination_target, task_type):
-        (loss, losses, output, termination_prob), grads = self.sequential_loss_and_grad_fn(self.model, input_data, graph_targets, termination_target)
+    Args:
+        model: NGE model
+        graph_data: Dictionary containing graph data and targets
+        embedding_dim: Model embedding dimension
+        bf_pred_alpha: Weight for BF predecessor loss
+        label_smoothing: Label smoothing value for cross-entropy
         
-        self.optimizer.update(self.model, grads)
-        return loss, losses, output, termination_prob
-
-    def _parallel_train_step_impl(self, input_data, graph_targets, termination_target, task_type):
-        (loss, losses, output, termination_prob), grads = self.parallel_loss_and_grad_fn(self.model, input_data, graph_targets, termination_target)
+    Returns:
+        Tuple of (average_loss, avg_aux_losses[5])
+    """
+    accumulated_loss = mx.array(0.0)
+    accumulated_aux_losses = mx.zeros([5])
+    
+    num_nodes = graph_data['num_nodes']
+    previous_step_hidden_states = mx.zeros([num_nodes, embedding_dim * 2])
+    
+    num_bf_steps = len(graph_data['bf_distance_targets'])
+    num_bfs_steps = len(graph_data['bfs_state_targets'])
+    
+    num_steps = max(num_bf_steps, num_bfs_steps)
+    
+    for i in range(num_steps):
+        # Check if samples exist
+        bf_sample_exists = (i + 1) < num_bf_steps
+        bfs_sample_exists = (i + 1) < num_bfs_steps
         
-        self.optimizer.update(self.model, grads)
-        return loss, losses, output, termination_prob
-
-    def _sequential_eval_step_impl(self, input_data, graph_targets, termination_target, task_type):
-        return self._sequential_loss_fn(self.model, input_data, graph_targets, termination_target)
-
-    def _parallel_eval_step_impl(self, input_data, graph_targets, termination_target, task_type):
-        return self._parallel_loss_fn(self.model, input_data, graph_targets, termination_target)
-
-    def train_step(self, input_data, graph_targets, termination_target, task_type, logger=None):
-        if task_type == SEQUENTIAL_ALGORITHM:
-            result = self.compiled_sequential_train_step(input_data, graph_targets, termination_target, task_type)
-        elif task_type == PARALLEL_ALGORITHM:
-            result = self.compiled_parallel_train_step(input_data, graph_targets, termination_target, task_type)
+        if not (bf_sample_exists or bfs_sample_exists):
+            continue
         
-        # Evaluate outside of compiled function
-        mx.eval(result, self.model.parameters())
+        # Prepare data for current step
+        if bfs_sample_exists:
+            true_bfs_state = graph_data['bfs_state_targets'][i]
+            target_bfs_state = graph_data['bfs_state_targets'][i + 1]
+        else:
+            true_bfs_state = graph_data['bfs_state_targets'][-1]
+            target_bfs_state = graph_data['bfs_state_targets'][-1]
         
-        # Handle logging outside of compiled function
-        if logger:
-            loss, losses, output, termination_prob = result
-            if task_type == PARALLEL_ALGORITHM:
-                state, distance, predesecor = output
-                reachability_target, distance_target, predesecor_target = graph_targets
-                
-                # Calculate accuracy metrics
-                metrics = calculate_accuracy_metrics(state, predesecor, reachability_target, predesecor_target, 
-                                                   termination_prob, termination_target, distance, distance_target)
-                logger.log_step_metrics(metrics, phase='train')
-                
-                logger.log_debug_info(state, predesecor, reachability_target, predesecor_target, 
-                                    termination_prob, termination_target, distance, distance_target, task.PARALLEL_ALGORITHM)
-            elif task_type == SEQUENTIAL_ALGORITHM:
-                state, predesecor = output
-                reachability_target, predesecor_target = graph_targets
-                
-                # Calculate accuracy metrics
-                metrics = calculate_accuracy_metrics(state, predesecor, reachability_target, predesecor_target, 
-                                                   termination_prob, termination_target)
-                logger.log_step_metrics(metrics, phase='train')
-                
-                logger.log_debug_info(state, predesecor, reachability_target, predesecor_target, 
-                                    termination_prob, termination_target, task_type=task.SEQUENTIAL_ALGORITHM)
+        if bf_sample_exists:
+            true_distance_bf = graph_data['bf_distance_targets'][i]
+            target_distance_bf = graph_data['bf_distance_targets'][i + 1]
+            target_predecessor_bf = graph_data['bf_predecessor_targets'][i + 1]
+        else:
+            true_distance_bf = graph_data['bf_distance_targets'][-1]
+            target_distance_bf = graph_data['bf_distance_targets'][-1]
+            target_predecessor_bf = graph_data['bf_predecessor_targets'][-1]
         
-        return result
-
-    def eval_step(self, input_data, graph_targets, termination_target, task_type, logger=None):
-        if task_type == SEQUENTIAL_ALGORITHM:
-            result = self.compiled_sequential_eval_step(input_data, graph_targets, termination_target, task_type)
-        elif task_type == PARALLEL_ALGORITHM:
-            result = self.compiled_parallel_eval_step(input_data, graph_targets, termination_target, task_type)
-        
-        # Handle logging outside of compiled function
-        if logger:
-            loss, losses, output, termination_prob = result
-            if task_type == PARALLEL_ALGORITHM:
-                state, distance, predesecor = output
-                reachability_target, distance_target, predesecor_target = graph_targets
-                
-                # Calculate accuracy metrics
-                metrics = calculate_accuracy_metrics(state, predesecor, reachability_target, predesecor_target, 
-                                                   termination_prob, termination_target, distance, distance_target)
-                logger.log_step_metrics(metrics, phase='val')
-                
-                logger.log_debug_info(state, predesecor, reachability_target, predesecor_target, 
-                                    termination_prob, termination_target, distance, distance_target, task.PARALLEL_ALGORITHM)
-            elif task_type == SEQUENTIAL_ALGORITHM:
-                state, predesecor = output
-                reachability_target, predesecor_target = graph_targets
-                
-                # Calculate accuracy metrics
-                metrics = calculate_accuracy_metrics(state, predesecor, reachability_target, predesecor_target, 
-                                                   termination_prob, termination_target)
-                logger.log_step_metrics(metrics, phase='val')
-                
-                logger.log_debug_info(state, predesecor, reachability_target, predesecor_target, 
-                                    termination_prob, termination_target, task_type=task.SEQUENTIAL_ALGORITHM)
-        
-        return result
-
-    def train_model(self, dataset, task_type, logger=None, phase="train"):
-        """Training function for both parallel and sequential algorithms"""
-        is_train = (phase == "train")
-        total_loss = 0.0
-        valid_graphs = 0
-        
-        # Convert enum to int for compiled functions
-        task_type_int = task_type.value if hasattr(task_type, 'value') else task_type
-        
-        for graph_idx, graph_data in enumerate(dataset):
-            if task_type_int == PARALLEL_ALGORITHM:
-                execution_history = graph_data['targets']['parallel']
-                state_key = 'bfs_state'
-                pred_key = 'bf_predecessor'
-                term_key = 'bf_termination'
-                distance_key = 'bf_distance'
-            else:
-                execution_history = graph_data['targets']['sequential']
-                state_key = 'prim_state'
-                pred_key = 'prim_predecessor'
-                term_key = 'prim_termination'
-                distance_key = None
-            
-            connection_matrix = graph_data['connection_matrix']
-            residual_features = mx.zeros([len(execution_history[state_key][0])])
-            num_steps = len(execution_history[state_key]) - 1
-
-            if num_steps == 0:
-                continue
-            
-            valid_graphs += 1
-            graph_total_loss = 0.0
-            
-            for i in range(num_steps):
-                # Prepare data
-                state_target = execution_history[state_key][i + 1]
-                pred_target = execution_history[pred_key][i + 1]
-                termination_target = execution_history[term_key][i + 1]
-                
-                current_features = mx.argmax(execution_history[state_key][i], axis=1)
-                input_features = mx.stack([current_features, residual_features], axis=1)
-                input_data = (input_features, connection_matrix)
-                
-                if distance_key:
-                    distance_target = execution_history[distance_key][i + 1]
-                    graph_targets = (state_target, distance_target, pred_target)
-                else:
-                    graph_targets = (state_target, pred_target)
-                
-                # Training or evaluation step - use integer task type
-                if is_train:
-                    loss, losses, output, termination_prob = \
-                        self.train_step(input_data, graph_targets, termination_target, task_type_int, logger)
-                else:
-                    loss, losses, output, termination_prob = \
-                        self.eval_step(input_data, graph_targets, termination_target, task_type_int, logger)
-
-                # Update residual features
-                if task_type_int == PARALLEL_ALGORITHM:
-                    state, distance, _ = output
-                else:
-                    state, _ = output
-                residual_features = mx.argmax(state, axis=1)
-                graph_total_loss += float(loss)
-            
-            # Update progress bar
-            avg_graph_loss = graph_total_loss / num_steps
-            if logger:
-                if is_train:
-                    logger.update_progress(train_loss=avg_graph_loss)
-                else:
-                    logger.update_progress(val_loss=avg_graph_loss)
-            
-            total_loss += avg_graph_loss
-        
-        return total_loss / valid_graphs if valid_graphs > 0 else 0.0
-
-    def train_harness(self, train_dataset, val_dataset, logger=None, task_types=None, 
-                     num_epochs=10, early_stopping_patience=3):
-        """Main training harness supporting single or multi-task training"""
-        if task_types is None:
-            task_types = [task.SEQUENTIAL_ALGORITHM]
-        elif not isinstance(task_types, list):
-            task_types = [task_types]
-            
-        best_val_loss = float('inf')
-        best_epoch = 0
-        patience_counter = 0
-        
-        for epoch in range(num_epochs):
-            # Start epoch progress bar
-            if logger:
-                total_graphs = len(train_dataset) + len(val_dataset)
-                logger.start_epoch(epoch, num_epochs, total_graphs)
-            
-            # Training phase - alternate between tasks if multi-task
-            train_losses = []
-            for task_type in task_types:
-                train_loss = self.train_model(train_dataset, task_type, logger, phase="train")
-                train_losses.append(train_loss)
-            avg_train_loss = sum(train_losses) / len(train_losses)
-            
-            # Validation phase - evaluate on all tasks
-            val_losses = []
-            for task_type in task_types:
-                val_loss = self.train_model(val_dataset, task_type, logger, phase="val")
-                val_losses.append(val_loss)
-            avg_val_loss = sum(val_losses) / len(val_losses)
-            
-            # Log epoch
-            if logger:
-                logger.log_epoch(epoch, avg_train_loss, avg_val_loss)
-            
-            # Check for improvement
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                best_epoch = epoch
-                patience_counter = 0
-            else:
-                patience_counter += 1
-            
-            # Early stopping
-            if patience_counter >= early_stopping_patience:
-                print(f"Early stopping at epoch {epoch + 1}")
-                break
-        
-        # Log final results
-        if logger:
-            logger.log_final(best_val_loss, best_epoch)
-        
-        return {
-            'best_val_loss': best_val_loss,
-            'best_epoch': best_epoch,
-            'task_types': task_types,
-            'train_losses': train_losses,
-            'val_losses': val_losses
+        # Generate termination targets
+        is_last_bf_step = (i + 1) == (num_bf_steps - 1)
+        is_last_bfs_step = (i + 1) == (num_bfs_steps - 1)
+        termination_targets = {
+            'bf': mx.array(1.0 if is_last_bf_step else 0.0),
+            'bfs': mx.array(1.0 if is_last_bfs_step else 0.0)
         }
-
-    def evaluate_on_test_sets(self, test_datasets, task_types=None, logger=None):
-        """Evaluate model on multiple test datasets"""
-        if task_types is None:
-            task_types = [task.SEQUENTIAL_ALGORITHM, task.PARALLEL_ALGORITHM]
-        elif not isinstance(task_types, list):
-            task_types = [task_types]
-            
-        results = {}
         
-        for dataset_name, dataset in test_datasets.items():
-            print(f"\nEvaluating on {dataset_name} ({len(dataset)} graphs)...")
-            dataset_results = {}
-            
-            for task_type in task_types:
-                task_name = "sequential" if task_type == task.SEQUENTIAL_ALGORITHM else "parallel"
-                
-                # Create a temporary logger to capture test metrics
-                test_logger = SimpleLogger(debug=False) if logger is None else logger
-                test_logger.start_epoch(0, 1, len(dataset))
-                
-                test_loss = self.train_model(dataset, task_type, test_logger, phase="test")
-                dataset_results[task_name] = test_loss
-                
-                # Get test accuracy metrics
-                test_metrics = test_logger._average_metrics(test_logger.step_metrics.get('val', []))
-                
-                print(f"  {task_name} - Loss: {test_loss:.4f}", end="")
-                if test_metrics:
-                    print(f", Acc - State: {test_metrics.get('state_acc', 0):.3f}, "
-                          f"Pred: {test_metrics.get('pred_acc', 0):.3f}, "
-                          f"Term: {test_metrics.get('term_acc', 0):.3f}", end="")
-                    if 'dist_acc' in test_metrics:
-                        print(f", Dist: {test_metrics.get('dist_acc', 0):.3f}")
-                    else:
-                        print()
-                else:
-                    print()
-            
-            results[dataset_name] = dataset_results
+        # Prepare model inputs
+        node_algo_features = mx.stack([true_bfs_state, true_distance_bf], axis=1)
+        input_embeddings = mx.concatenate([previous_step_hidden_states, node_algo_features], axis=1)
+        model_input = (input_embeddings, graph_data['edge_matrix'])
         
-        return results
+        # Forward pass
+        bfs_output, bf_output, termination_probs, processed_embeddings = model(model_input)
+        
+        # Compute losses
+        if bf_sample_exists:
+            bf_distance_predictions, bf_predecessor_predictions = bf_output
+            bf_distance_loss = nn.losses.mse_loss(
+                bf_distance_predictions, target_distance_bf, reduction='mean'
+            )
+            
+            # Convert invalid, denoted by -1, to a valid class, 0
+            valid_mask = (target_predecessor_bf != -1)
+            safe_targets = mx.where(valid_mask, target_predecessor_bf, mx.zeros_like(target_predecessor_bf))
+            
+            per_node_ce = nn.losses.cross_entropy(
+                bf_predecessor_predictions, safe_targets, reduction='none', label_smoothing=label_smoothing
+            )
+            
+            # Only consider loss over valid nodes
+            valid_mask_f = valid_mask.astype(mx.float32)
+            denom = mx.maximum(valid_mask_f.sum(), mx.array(1.0))
+            bf_predecessor_loss = (per_node_ce * valid_mask_f).sum() / denom
+            
+            bf_termination_loss = nn.losses.binary_cross_entropy(
+                termination_probs['bf'], termination_targets['bf'], reduction='mean', with_logits=True
+            )
+        else:
+            bf_distance_loss = mx.array(0.0)
+            bf_predecessor_loss = mx.array(0.0)
+            bf_termination_loss = mx.array(0.0)
+        
+        if bfs_sample_exists:
+            bfs_state_loss = nn.losses.binary_cross_entropy(
+                bfs_output, target_bfs_state, reduction='mean', with_logits=True
+            )
+            bfs_termination_loss = nn.losses.binary_cross_entropy(
+                termination_probs['bfs'], termination_targets['bfs'], reduction='mean', with_logits=True
+            )
+        else:
+            bfs_state_loss = mx.array(0.0)
+            bfs_termination_loss = mx.array(0.0)
+        
+        raw_losses = mx.array([
+            bf_distance_loss, bf_pred_alpha * bf_predecessor_loss, bfs_state_loss,
+            bf_termination_loss, bfs_termination_loss
+        ])
+        total_step_loss = mx.sum(raw_losses)
+        
+        # Update for next step
+        previous_step_hidden_states = processed_embeddings
+        accumulated_loss += total_step_loss
+        accumulated_aux_losses += raw_losses
+    
+    # Compute averages AFTER the loop
+    bf_steps = max(num_bf_steps - 1, 0)
+    bfs_steps = max(num_bfs_steps - 1, 0)
+    effective_steps = max(bf_steps, bfs_steps, 1)
+    
+    average_loss = accumulated_loss / effective_steps
+    per_task_counter = mx.array([
+        max(bf_steps, 1),   # bf_distance
+        max(bf_steps, 1),   # bf_predecessor
+        max(bfs_steps, 1),  # bfs_state
+        max(bf_steps, 1),   # bf_termination
+        max(bfs_steps, 1),  # bfs_termination
+    ], dtype=mx.float32)
+    avg_aux_losses = accumulated_aux_losses / per_task_counter
+    
+    return average_loss, avg_aux_losses
 
 
-def create_trainer(model_config, learning_rate=0.001):
-    """Factory function to create a trainer with model and optimizer"""
-    model = nge(**model_config)
-    optimizer = optim.Adam(learning_rate=learning_rate)
-    return NGETrainer(model, optimizer)
+def evaluate_model(model, dataset, embedding_dim: int):
+    """Evaluate model on a dataset.
+    
+    Args:
+        model: NGE model
+        dataset: List of graph data dictionaries
+        embedding_dim: Model embedding dimension
+        
+    Returns:
+        Tuple of (avg_aux_losses, avg_epoch_loss, avg_accuracies)
+    """
+    # Set model to evaluation mode (disables dropout)
+    model.eval()
+    
+    accumulated_epoch_loss = mx.array(0.0)
+    accumulated_aux_losses = mx.zeros([5])
+    accumulated_accuracies = mx.zeros([5])
+    
+    for graph_data in dataset:
+        aux_losses, loss, accuracies = calculate_losses_and_accuracies(model, graph_data, embedding_dim)
+        
+        accumulated_epoch_loss += loss
+        accumulated_aux_losses += aux_losses
+        accumulated_accuracies += accuracies
+    
+    avg_epoch_loss = accumulated_epoch_loss / len(dataset)
+    avg_aux_losses = accumulated_aux_losses / len(dataset)
+    avg_accuracies = accumulated_accuracies / len(dataset)
+    
+    # Set model back to training mode
+    model.train()
+    
+    return avg_aux_losses, avg_epoch_loss, avg_accuracies
+
+
+def train_epoch(
+    model,
+    optimizer,
+    dataset,
+    embedding_dim: int,
+    batch_size: int = 1,
+    max_grad_norm: float = 1.0,
+    bf_pred_alpha: float = 1.0,
+    label_smoothing: float = 0.0
+):
+    """Train for one epoch.
+    
+    Args:
+        model: NGE model
+        optimizer: Optimizer instance
+        dataset: List of graph data dictionaries
+        embedding_dim: Model embedding dimension
+        batch_size: Gradient accumulation batch size
+        max_grad_norm: Maximum gradient norm for clipping
+        bf_pred_alpha: Weight for BF predecessor loss
+        label_smoothing: Label smoothing value
+        
+    Returns:
+        Tuple of (avg_epoch_loss, avg_aux_losses, avg_per_head_grads)
+    """
+    model.train()
+    
+    def loss_fn(model, graph_data):
+        return graph_execution_loss_fn(
+            model, graph_data, embedding_dim, bf_pred_alpha, label_smoothing
+        )
+    
+    loss_and_grad_fn = nn.value_and_grad(model, loss_fn)
+    
+    accumulated_epoch_loss = mx.array(0.0)
+    accumulated_aux_losses = mx.zeros([5])
+    accumulated_per_head_grads = {}
+    
+    permutation = mx.random.permutation(len(dataset))
+    
+    acc_batch_grads = None
+    bucket_count = 0
+    
+    for idx_in_epoch, idx in enumerate(permutation):
+        graph_data = dataset[int(idx.item())]
+        
+        (loss, aux_losses), grads = loss_and_grad_fn(model, graph_data)
+        
+        per_head_magnitude_grads = extract_per_head_magnitude_grads(grads)
+        
+        # Accumulate per-head gradients
+        for head_name, grad_value in per_head_magnitude_grads.items():
+            if head_name not in accumulated_per_head_grads:
+                accumulated_per_head_grads[head_name] = grad_value
+            else:
+                accumulated_per_head_grads[head_name] += grad_value
+        
+        # Gradient accumulation
+        if acc_batch_grads is None:
+            acc_batch_grads = grads
+        else:
+            acc_batch_grads = utils.tree_map(lambda a, b: a + b, acc_batch_grads, grads)
+        bucket_count += 1
+        
+        end_of_bucket = (bucket_count == batch_size)
+        end_of_epoch = (idx_in_epoch + 1 == len(permutation))
+        if end_of_bucket or end_of_epoch:
+            # Average by actual bucket size
+            avg_grads = utils.tree_map(lambda x: x / bucket_count, acc_batch_grads)
+            
+            # Clip gradients
+            avg_grads, _ = optim.clip_grad_norm(avg_grads, max_norm=max_grad_norm)
+            
+            optimizer.update(model, avg_grads)
+            mx.eval(model.parameters(), optimizer.state)
+            
+            # Reset for next bucket
+            acc_batch_grads = None
+            bucket_count = 0
+        
+        # Book-keeping for epoch metrics
+        accumulated_epoch_loss += loss
+        accumulated_aux_losses += aux_losses
+    
+    avg_epoch_loss = accumulated_epoch_loss / len(dataset)
+    avg_aux_losses = accumulated_aux_losses / len(dataset)
+    
+    # Compute average per-head gradients
+    avg_per_head_grads = {
+        head_name: grad_value / len(dataset)
+        for head_name, grad_value in accumulated_per_head_grads.items()
+    }
+    
+    return avg_epoch_loss, avg_aux_losses, avg_per_head_grads
