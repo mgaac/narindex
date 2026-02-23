@@ -7,7 +7,7 @@ import argparse
 import mlx.core as mx
 import mlx.nn as nn
 from tqdm import tqdm
-from typing import Dict, Any, Tuple, Optional, Callable
+from typing import Dict, Tuple
 
 
 def standard_arg_parser(description: str) -> argparse.ArgumentParser:

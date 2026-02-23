@@ -14,7 +14,6 @@ import argparse
 import sys
 import os
 import csv
-import json
 import random
 from functools import partial
 
@@ -29,10 +28,6 @@ from tqdm import tqdm
 from model import NeuralTuringMachine
 from train import loss_fn
 from utils.common import setup_reproducibility
-from utils.analysis import (
-    compute_gradient_stats, compute_activation_stats, 
-    compute_param_stats, compute_update_ratios
-)
 
 
 # Default network configuration
@@ -214,8 +209,6 @@ def run_experiment(args):
         ])
         writer.writeheader()
         
-        prev_params = {k: v.copy() for k, v in model.parameters().items()}
-        
         pbar = tqdm(range(args.num_steps), desc="Training NTM", unit="step")
         
         for step_idx in pbar:
@@ -249,7 +242,6 @@ def run_experiment(args):
                     'best': f"{best_accuracy:.3f}"
                 })
                 
-                prev_params = {k: v.copy() for k, v in model.parameters().items()}
             else:
                 pbar.set_postfix({'loss': f"{float(loss):.6f}"})
     

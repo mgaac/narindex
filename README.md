@@ -1,41 +1,90 @@
 # Neural Algorithmic Reasoning Index
 
-A proto-index, perhaps, abiding by today's zeitgeist, a sort of worklog. An attempt to gain proficiency in the more practical aspects of graph representation learning. In a sense, reconciling too much paper reading with something more visceral. Implemented in MLX and at times accompanied by commentary, the techniques/methods/papers implemented were curated by myself and, as such, suffer from the noble curse of at times seeming too scattered. An attempt was made to nonetheless keep them focused around the area of Neural Algorithmic Reasoning, hence the name. *Work in progress*
+Collection of MLX implementations focused on neural algorithmic reasoning and graph representation learning.  
+The repository currently includes runnable experiments for GAT, MPNN, NTM, and NGE, with shared utilities for reproducibility and analysis.
 
-| Architecture | Results |
-| --- | --- |
-| Neural Turing Machines | Unsuccessful |
-| Graph Attention Networks | 83% acc. (CORA) |
-| Message Passing Neural Networks | 80% acc (CORA, MAX) |
-| Neural Execution Networks | **Training** |
-| Generalist Neural Algorithmic Learner | *Backlog* |
-| Graph Variational Autoencoder | *Backlog* |
-|Counterfactual G-invariance regularization| *Backlog* |
+## Implemented models
 
+| Model | Task | Status |
+| --- | --- | --- |
+| Graph Attention Network (GAT) | CORA node classification | Stable baseline |
+| Message Passing Neural Network (MPNN) | CORA node classification | Stable baseline |
+| Neural Turing Machine (NTM) | Synthetic copy task | Experimental |
+| Neural Graph Execution (NGE) | Bellman-Ford + BFS execution learning | Active development |
 
-### Usage
+## Repository layout
+
+- `implementations/gat/` GAT model, trainer, experiment runner.
+- `implementations/mpgnn/` MPNN model, trainer, experiment runner.
+- `implementations/ntm/` NTM model, trainer, experiment runner.
+- `implementations/nge/` NGE model, synthetic data pipeline, trainer.
+- `utils/common.py` shared training loop, losses, metrics, reproducibility helpers.
+- `utils/analysis.py` gradient/activation/parameter statistics and tabular export.
+- `utils/datasets/CORA/` CORA loader and packaged dataset files.
+
+## Environment setup
+
 ```bash
-# Graph Attention Networks (GAT) on CORA dataset
-cd implementations/gat
-python experiment.py --total-steps 2000 --learning-rate 0.003
-
-# Message Passing Neural Networks (MPNN) 
-cd implementations/mpgnn
-python experiment.py --aggregation max --total-steps 2000
+conda run -n mlx pip install -r requirements.txt
 ```
 
-All experiments include detailed parameter options via `--help`.
+MLX targets Apple Silicon. For best results, run on macOS with Metal support.
 
+## Quick start
 
-### Neural Turing Machines
-More than anything, I am now convinced that Neural Turing Machines (NTMs) reflect the will of their creators to somehow manage the ungodly gradient dynamics that emerge during training—especially in the feedforward variant. This challenge is made worse not only by the scarcity of open-source implementations but, more surprisingly, by the near absence of substantial literature investigating them. Many hours were spent, nonetheless, modifying the architecture and training loop in hopes of replicating the original paper’s findings. This aim, however, was not achieved, partly due to serendipitous gradient collapses to NaN, and partly due to insufficient access to compute resources. Intuitively, it seems that the tasks we expect MLPs to perform under this paradigm lie right at the boundary of their representational capacity. Or perhaps more accurately, these are tasks for which the inductive biases inherent in traditional MLP architectures are fundamentally ill-suited, making their training a maximally sample-complex regime. It does feel odd, though, that so little is said about them, particularly given how intuitive they seem as a natural extension of regular feedforward networks.
+Run all commands from repository root.
 
-Implementation-wise, the only notable deviation from what might be called a “standard” approach—if such a standard exists—is the adoption of a branching architecture in which the controller and output branches are isolated from one another while sharing a common preprocessing module. That said, I have abstained from providing a detailed architectural description, since most of it can be inferred from the code, it failed to achieve any notable result, and lastly because LLMs render any attempt at a technical report somewhat redundant.
+### GAT on CORA
 
-### Graph Attention Networks & MPNN
-Naively, I never put much thought into learning PyTorch (same goes for MLX). That is, I treated it simply as a sort of translation process—one where semantics were crucial and syntax merely an afterthought. This proved to be a costly mistake. Many hours and many burned laps were needed in order to make me realize that I couldn’t simply loop my way through life and expect that blindness to vectorization, parallelization, etc., wouldn’t eventually come back to bite. Now, although I must admit it is not the most pleasant of activities, there is something satisfying in finally nailing the tensor acrobatics needed to make the models run efficiently. More precisely, I now see some beauty in neighborhood-aggregated softmax, in a way I was blind to months before. Here I must say Aleksa Gordić’s [notebooks](https://github.com/gordicaleksa/pytorch-GAT?tab=readme-ov-file) were invaluable.
+```bash
+conda run -n mlx python implementations/gat/experiment.py \
+  --num-steps 2000 \
+  --learning-rate 0.003 \
+  --data utils/datasets/CORA/data
+```
 
-### Neural Execution of Graph Algorithms
-First incursion into *true* algo. reasoning. Given the more obscure nature of this archiecture, I had a hard time translating the model's description to its actual implementation. Perhpas it was a lack of context by my part which leading me to expeirment my way through archutcetural details which to more expericned practioners could have easly infered. It does suggest, however, a need for more first principles type knwoldegd. In a snese, I felt all the errors I made could have easly been deduced from 
+### MPNN on CORA
 
-  
+```bash
+conda run -n mlx python implementations/mpgnn/experiment.py \
+  --aggregation max \
+  --num-steps 2000 \
+  --data utils/datasets/CORA/data
+```
+
+### NTM copy task
+
+```bash
+conda run -n mlx python implementations/ntm/experiment.py \
+  --num-steps 20000 \
+  --sequence-length 10
+```
+
+### NGE dataset + training
+
+```bash
+conda run -n mlx python implementations/nge/data_loading.py
+conda run -n mlx python implementations/nge/experiment.py \
+  --num-epochs 100 \
+  --data implementations/nge/data
+```
+
+## Reproducibility and evaluation notes
+
+- `setup_reproducibility()` is used across experiments to keep runs deterministic when possible.
+- CORA data is bundled under `utils/datasets/CORA/data`.
+- NGE synthetic datasets generated by `implementations/nge/data_loading.py` are saved to `implementations/nge/data/`.
+- Use each runner’s CLI help for full options:
+
+```bash
+conda run -n mlx python implementations/gat/experiment.py --help
+conda run -n mlx python implementations/mpgnn/experiment.py --help
+conda run -n mlx python implementations/ntm/experiment.py --help
+conda run -n mlx python implementations/nge/experiment.py --help
+```
+
+## Quality check
+
+```bash
+conda run -n mlx python -m compileall -q implementations utils
+```

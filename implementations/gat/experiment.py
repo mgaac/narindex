@@ -18,11 +18,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import mlx.core as mx
 import mlx.optimizers as optim
-from tqdm import tqdm
 
 from model import GAT
 from utils.common import (
-    cross_entropy_loss_fn, accuracy_fn, print_model_summary, 
+    cross_entropy_loss_fn, accuracy_fn,
     setup_reproducibility, TrainingLoop
 )
 from utils.datasets.CORA.cora import load_cora_data, get_cora_config
